@@ -1,5 +1,6 @@
 setup.py
-genSTEM/genStem.py
+genSTEM/Model.py
+genSTEM/__init__.py
 genSTEM.egg-info/PKG-INFO
 genSTEM.egg-info/SOURCES.txt
 genSTEM.egg-info/dependency_links.txt

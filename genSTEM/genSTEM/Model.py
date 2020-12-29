@@ -1,7 +1,92 @@
 import sympy as sp
 import numpy as np
 import matplotlib.pyplot as plt
-import cupy as cp
+try:
+    import cupy as cp
+
+except:
+    print('No CuPy')
+    cp = np
+
+
+def drift_points(shape=(10,10), drift_rad = 0, drift_strength=1e-4):
+    lenX, lenY = shape
+    drift_vector = (rotation_matrix(np.rad2deg(drift_rad)) @ [1,0]) * drift_strength
+    arr = np.zeros((lenX, lenY, 2))
+    drift = np.zeros(2)
+    corners = []
+    for yi in range(lenY):
+        for xi in range(lenX):
+            drift += drift_vector
+            position = np.array((xi, yi))
+            arr[xi, yi] = position + drift
+    return arr
+
+def plot(points, ax, lim=((),())):
+    points = points.reshape((-1, 2), order='F')
+    for i, xy in enumerate(points):
+        rect = plt.Rectangle(xy-0.25, 0.5, 0.5, color=plt.cm.RdYlBu(i))
+        ax.add_patch(rect)
+    xmin, ymin = points.min(0) - 2
+    xmax, ymax = points.max(0) + 3
+    if lim == ((),()):
+        ax.set_xlim(xmin, xmax)
+        ax.set_ylim(ymax, ymin)
+    else:
+        ax.set_xlim(lim[0])
+        ax.set_ylim(lim[1])  
+        
+def extend_3D_ones(arr_of_2d):
+    return np.hstack([arr_of_2d, np.ones((len(arr_of_2d),1))])
+    
+def get_matrix(xy, xyprime):
+    xy = extend_3D_ones(xy)
+    xyprime = extend_3D_ones(xyprime)
+    T, *_ = np.linalg.lstsq(xy, xyprime, rcond=None)
+    return T.T
+
+def transform_points(points, transform):
+    points = extend_3D_ones(points)
+    points_prime = points @ transform.T
+    return points_prime[:, :2]
+
+def transform_from_angle_strength(angle, strength, angle_diff=np.pi/2):
+    arr = np.zeros(np.shape(strength) + np.shape(angle) + (2,) + (3,3))
+    if np.shape(strength):
+        strength = strength[:, None, None]
+    angles = np.column_stack([angle, angle]).astype(float)
+    angles[:,1] = angle  + angle_diff
+
+    arr[...] = np.eye(3)
+    s_sin = strength*np.sin(angles)
+    s_cos = strength*np.cos(angles)
+    
+    arr[..., 0,0] = 1 + s_cos
+    arr[..., 0,1] = 10*s_cos
+    arr[..., 0,2] = s_cos
+    arr[..., 1,0] = s_sin
+    arr[..., 1,1] = 1 + 10*s_sin
+    arr[..., 1,2] = s_sin
+    
+    return arr.squeeze()
+
+def transform_from_angle_strength_asd(angle, strength, angle_diff=np.pi/2):
+    arr = np.zeros(np.shape(strength) + np.shape(angle) + (2,) + (3,3))
+    if np.shape(strength):
+        strength = strength[:, None, None]
+    angles = np.column_stack([angle, angle]).astype(float)
+    angles[:,1] = angle  + angle_diff
+
+    arr[...] = np.eye(3)
+    s_sin = strength*np.sin(angles)
+    s_cos = strength*np.cos(angles)
+    arr[..., 0,0] = 1 - 10*s_sin
+    arr[..., 1,0] = 10*s_cos
+    arr[..., 1,1] = 1 + s_cos
+    arr[..., 1,2] = s_cos
+    arr[..., 0,1] = -s_sin
+    arr[..., 0,2] = -s_sin
+    return arr.squeeze()
 
 def Gaussian2D(x, y, A, xc, yc, sigma):
     return A*np.exp(
@@ -156,11 +241,7 @@ class ImageModel:
                 offsety = drifty.max() if drifty.max() > -drifty.min() else drifty.min()
                 self.probe_positions_cupy -= cp.array([offsetx, offsety])[:, None, None] / 2
         
-
-            
-
-
-    
+        
     def create_parameters(self):
         xc, yc = self.atom_positions.T
         A = self.atom_numbers ** self.power
