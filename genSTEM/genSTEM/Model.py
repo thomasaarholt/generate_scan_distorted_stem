@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from tqdm.auto import tqdm
 from matplotlib.transforms import Affine2D
 from time import time
+from IPython import display
 
 try:
     import cupy as cp
@@ -14,7 +15,7 @@ except:
     cp = np
     from scipy.ndimage import affine_transform
 
-def create_final_stack_and_average(images, scanangles, best_str, best_angle):
+def create_final_stack_and_average(images, scanangles, best_str, best_angle, normalize_correlation = True):
     """From an estimated drift strength and angle, produce a stack of transformed 
     images and the stack average.
     """
@@ -33,7 +34,7 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle):
     warped_imgA = warped_images_nonan[0]
     shifts = []
     for warped_imgB in warped_images_nonan[1:]:
-        s, m = hybrid_correlation(warped_imgA, warped_imgB)
+        s, m = hybrid_correlation(warped_imgA, warped_imgB, normalize_mean=normalize_correlation)
         shifts.append((int(s[0].get()), int(s[1].get())))
 
     warped_images2 = cp.stack(warped_images_with_nan[:1] + [translate(img, shift) for img, shift in zip(warped_images_with_nan[1:], shifts)])
@@ -42,7 +43,7 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle):
     
     return mean_image.get(), warped_images_nonan.get()
 
-def estimate_drift(images, scanangles, tolerancy_percent=1):
+def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlation=True, debug=False, correlation_power=0.9):
     """Estimates the global, constant drift on an image using affine transformations.
     Takes as input a list of images and scanangles. Only tested with square images.
 
@@ -53,31 +54,51 @@ def estimate_drift(images, scanangles, tolerancy_percent=1):
     towards the best fit.
     """
     t1 = time()
-    angle_limits_step = (0, 360 - 45, 45)
-    str_limits_step = (0, 1/images[0].shape[0], 0.2/images[0].shape[0])
+    angle_step = 45
+    angle_limits_step = cp.asarray((0, 360 - angle_step, angle_step))
+    str_limits_step = cp.asarray((0, 0.5/images[0].shape[0], 0.05/images[0].shape[0]))
 
-    best_angle, best_str = 0,0
+    best_angle, best_str = cp.asarray(0),cp.asarray(0)
     old_values = np.array((best_angle,best_str))
     new_values = np.array([np.inf, np.inf])
     i = 0
     
     while i < 1 or not drift_values_converged(old_values, new_values, tolerancy_percent=1):
-        print("Iteration #{}. Best guess: Angle: {}°, Strength: {:.2e}".format(
-            i, np.round(best_angle, 2), np.round(best_str, 5)))
+        print(
+            "Iteration #{}: Best guess: Angle: {}°, Strength: {:.2e}".format(
+            i, np.round(best_angle.item(), 2), np.round(best_str.item(), 5))
+            + "\nLimits: [{}°, {}°], [{:.2e}, {:.2e}]".format(
+                angle_limits_step[0].item(), 
+                (angle_limits_step[1] + angle_limits_step[2]).item(),
+                str_limits_step[0].item(),
+                (str_limits_step[1] + str_limits_step[2]).item()
+                ))
         old_values = np.array([best_angle, best_str])
         best_angle, best_str = get_best_angle_strength_shifts(
             images,
             scanangles,
             angle_limits_step, 
-            str_limits_step
+            str_limits_step,
+            normalize_correlation=normalize_correlation,
+            correlation_power=correlation_power
         )
         new_values = np.array([best_angle, best_str])
         angle_limits_step = best_angle-angle_limits_step[2]/2, best_angle + angle_limits_step[2]/2, angle_limits_step[2] / 3
         str_limits_step = best_str-str_limits_step[2]/2, best_str + str_limits_step[2]/2, str_limits_step[2] / 3
         i += 1
-    print("Iteration #{}. Best guess: Angle: {}°, Strength: {:.2e}".format(
-            i, np.round(best_angle, 2), np.round(best_str, 5)))
+        if debug:
+            plt.ioff()
+            mean, _ = create_final_stack_and_average(images, scanangles, best_str, best_angle)
+            fig = plt.figure()
+            plt.imshow(mean)
+            #display.clear_output(wait=True)
+            display.display(plt.gcf())
+            plt.ion()
+    print("Final iteration: Final guess: Angle: {}°, Strength: {:.2e}".format(
+            np.round(best_angle, 2).item(), np.round(best_str, 5).item()
+            ))
     print(f"\nTook {round(time() - t1, 1)} seconds")
+        
     return best_angle, best_str
 
 def swap_transform_standard(T):
@@ -301,13 +322,14 @@ def transform_from_angle_strength5(angle, strength, angle_diff=np.pi/2, xlen=100
     return arr.squeeze()
 
 def transform_drift_scan(scan_rotation_deg=0, drift_angle_deg=0, strength=0, xlen=100):
-    arr = np.zeros(np.shape(strength) + np.shape(drift_angle_deg) + (3,3))
-    if np.shape(strength):
+
+    arr = cp.zeros(cp.shape(strength) + cp.shape(drift_angle_deg) + (3,3))
+    if cp.shape(strength):
         strength = strength[:, None, None]
-    angle = np.deg2rad(drift_angle_deg + scan_rotation_deg)
-    arr[...] = np.eye(3)
-    s_sin = strength*np.sin(angle)
-    s_cos = strength*np.cos(angle)
+    angle = cp.deg2rad(drift_angle_deg + scan_rotation_deg)
+    arr[...] = cp.eye(3)
+    s_sin = strength*cp.sin(angle)
+    s_cos = strength*cp.cos(angle)
     arr[..., 0,0] = 1 - s_cos
     arr[..., 0,1] = -s_cos*xlen
     arr[..., 0,2] = -s_cos    
@@ -316,16 +338,16 @@ def transform_drift_scan(scan_rotation_deg=0, drift_angle_deg=0, strength=0, xle
     arr[..., 1,2] = -s_sin
     return arr.squeeze()
 
-def warp_image_cuda(img, scanrotation, strength, drift_angle, nan=False):
-    shift_x, shift_y = np.array(img.shape) / 2
+def warp_image_cuda(img, scanrotation_deg, strength, drift_angle_deg, nan=False):
+    shift_x, shift_y = cp.array(img.shape) / 2
     main_transform = transform_drift_scan(
-         -scanrotation, 
-         drift_angle, 
+         -scanrotation_deg, 
+         drift_angle_deg, 
          strength, 
          img.shape[-2])
     T = (
-    Affine2D().translate(-shift_x, -shift_y)
-    + Affine2D(main_transform).rotate_deg(scanrotation).translate(shift_x, shift_y)
+    CupyAffine2D().translate(-shift_x, -shift_y)
+    + CupyAffine2D(main_transform).rotate_deg(scanrotation_deg).translate(shift_x, shift_y)
     )
 
     cval = cp.nan if nan else 0 # value of pixels that were outside the image border
@@ -354,7 +376,7 @@ def warp_image(img, scanrotation, strength, drift_angle):
     return warp(img, np.linalg.inv(T.get_matrix()))
 
 
-def warp_and_correlate(images, scanangles, drift_angles, strengths):
+def warp_and_correlate(images, scanangles, drift_angles, strengths, normalize_correlation=True, correlation_power=0.9):
     all_maxes = []
     pairs = []
     for ai, drift_angle in tqdm(
@@ -376,20 +398,23 @@ def warp_and_correlate(images, scanangles, drift_angles, strengths):
                 total=len(images[1:]),
                 leave=False):
                 warped_imgB = warp_image_cuda(img, scanangle, strength, drift_angle)
-                m = hybrid_correlation(warped_imgA, warped_imgB, fit_only=True)
+                m = hybrid_correlation(warped_imgA, warped_imgB, fit_only=True, normalize_mean=normalize_correlation, p=correlation_power)
                 current_maxes.append(m.get())
             all_maxes.append(current_maxes)
             pairs.append((drift_angle, strength))
     return all_maxes, pairs
 
-def get_best_angle_strength_shifts(images, scanangles, angle_limits_step, strength_limits_step):
+def get_best_angle_strength_shifts(images, scanangles, angle_limits_step, strength_limits_step, normalize_correlation=True, correlation_power=0.9):
     
     low, high, step = angle_limits_step
-    drift_angles = np.arange(low, high+step, step) % 360
+    low, high, step = low.item(), high.item(), step.item()
+    drift_angles = cp.arange(low, high+step, step) #% 360
+
     low, high, step = strength_limits_step
-    drift_strengths = np.arange(low, high+step, step)
+    low, high, step = low.item(), high.item(), step.item()
+    drift_strengths = cp.arange(low, high+step, step)
     
-    all_maxes, pairs = warp_and_correlate(images, scanangles, drift_angles, drift_strengths)
+    all_maxes, pairs = warp_and_correlate(images, scanangles, drift_angles, drift_strengths, normalize_correlation=normalize_correlation, correlation_power=correlation_power)
     i = np.array(all_maxes).mean(1).argmax() # take the mean over each set of images
     best_drift_angle, best_drift_strength = pairs[i]
     return best_drift_angle, best_drift_strength
@@ -463,6 +488,23 @@ def add_line_jitter(XYshape, strength = 0.3, horizontal=True, vertical=False, ):
     return jitter
 
 class ImageModel:
+    """Create a STEM-HAADF like image from a list of positions and atomic numbers, or from
+    an ASE atoms object. Can add features like:
+
+    scan_rotation: deg
+    jitter_strength: float, shifts each scanline by a random factor
+    jitter_horizontal: shift scanline leftright by above
+    jitter_vertical: shift scnaline updown by above
+    pixel_size: Å, Affects to image resolution
+    sigma: standard deviation of 2D gaussian representing atomic columns
+    power: HAADF n-factor 
+    drift_strength: Automatically divided by image shape - should be 0-10
+    drift_vector: Direction of drift
+    centre_drift: Shift image borders so drifted image is centered
+    square: Make image square
+    vacuum: Add whitespace around image
+    fast: Only compute one layer of unique atoms
+    """
 
     def __init__(
         self, 
@@ -471,7 +513,7 @@ class ImageModel:
         jitter_horizontal=True, jitter_vertical=False,
         pixel_size=0.1, sigma=0.4, power=1.8, 
         drift_strength = 0, drift_vector=[1,0], centre_drift=True,
-        square = False, vacuum=5.0):
+        square = False, vacuum=5.0, fast=False):
         
         if atoms:
             self.atom_positions = atoms.positions[:,:2]
@@ -483,6 +525,13 @@ class ImageModel:
             )
             self.atom_positions = positions
             self.atom_numbers = numbers
+
+        if fast:
+            unique = np.unique(np.column_stack([self.atom_positions, self.atom_numbers]), axis=0)
+
+            self.atom_positions = unique[:, :2]
+            self.atom_numbers =  unique[:, 2]
+                
 
         self.number_of_atoms = len(self.atom_numbers)
         self.pixel_size = pixel_size
@@ -617,3 +666,60 @@ class ImageModel:
             img += gauss
         return img
     
+class CupyAffine2D():
+    def __init__(self, matrix=cp.eye(3)):
+        self.matrix = matrix
+
+    def __add__(self, other):
+        return CupyAffine2D(other.matrix @ self.matrix)
+    
+    def get_matrix(self):
+        return self.matrix
+
+    def __array__(self):
+        return self.matrix
+
+    def translate(self, sx, sy):
+        arr = cp.eye(3)
+        arr[0,2] = sx
+        arr[1,2] = sy
+        return self + CupyAffine2D(arr)
+
+    def shear(self, shx, shy):
+        arr = cp.eye(3)
+        arr[0,1] = cp.tan(shx)
+        arr[1,0] = cp.tan(shy)
+        return self + CupyAffine2D(arr)
+    
+    def shear(self, shx, shy):
+        arr = cp.eye(3)
+        arr[0,1] = cp.tan(shx)
+        arr[1,0] = cp.tan(shy)
+        return self + CupyAffine2D(arr)
+
+    def scale(self, sx, sy):
+        arr = cp.eye(3)
+        arr[0,0] = sx
+        arr[1,1] = sy
+        return self + CupyAffine2D(arr)
+
+    def rotate(self, theta):
+        arr = cp.eye(3)
+        c = cp.cos(theta)
+        s = cp.sin(theta)
+        arr[0,0] = c
+        arr[0,1] = -s
+        arr[1,0] = s
+        arr[1,1] = c
+        return self + CupyAffine2D(arr)
+    
+    def rotate_deg(self, theta):
+        arr = cp.eye(3)
+        theta = cp.deg2rad(theta)
+        c = cp.cos(theta)
+        s = cp.sin(theta)
+        arr[0,0] = c
+        arr[0,1] = -s
+        arr[1,0] = s
+        arr[1,1] = c
+        return self + CupyAffine2D(arr)
