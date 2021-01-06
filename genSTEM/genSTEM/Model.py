@@ -5,15 +5,17 @@ from tqdm.auto import tqdm
 from matplotlib.transforms import Affine2D
 from time import time
 from IPython import display
+import gc
 
 try:
     import cupy as cp
-    from cupyx.scipy.ndimage import affine_transform
+    from cupyx.scipy.ndimage import affine_transform, zoom
+    
 
 except:
     print('No CuPy')
     cp = np
-    from scipy.ndimage import affine_transform
+    from scipy.ndimage import affine_transform, zoom
 
 def create_final_stack_and_average(images, scanangles, best_str, best_angle, normalize_correlation = True):
     """From an estimated drift strength and angle, produce a stack of transformed 
@@ -25,7 +27,7 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle, nor
         scanangle, 
         best_str, 
         best_angle,
-        nan=False)
+        nan=True)
     for img, scanangle in zip(images, scanangles)]
 
     warped_images_nonan = cp.stack(warped_images_with_nan)
@@ -33,15 +35,18 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle, nor
 
     warped_imgA = warped_images_nonan[0]
     shifts = []
+    #mean_image = warped_imgA / len(images)
     for warped_imgB in warped_images_nonan[1:]:
         s, m = hybrid_correlation(warped_imgA, warped_imgB, normalize_mean=normalize_correlation)
-        shifts.append((int(s[0].get()), int(s[1].get())))
+        shift = s[0].item(), s[1].item()
+        shifts.append(shift)
+        #mean_image += translate(warped_imgB, shift)/len(images)
 
     warped_images2 = cp.stack(warped_images_with_nan[:1] + [translate(img, shift) for img, shift in zip(warped_images_with_nan[1:], shifts)])
     mean_image = cp.nanmean(warped_images2, axis=0)
     mean_image[cp.isnan(mean_image)] = 0
     
-    return mean_image.get(), warped_images_nonan.get()
+    return mean_image.get()#, warped_images_nonan.get()
 
 def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlation=True, debug=False, correlation_power=0.9):
     """Estimates the global, constant drift on an image using affine transformations.
@@ -54,46 +59,100 @@ def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlatio
     towards the best fit.
     """
     t1 = time()
-    angle_step = 45
-    angle_limits_step = cp.asarray((0, 360 - angle_step, angle_step))
-    str_limits_step = cp.asarray((0, 0.5/images[0].shape[0], 0.05/images[0].shape[0]))
+    angle_steps = 8
+    angle_low, angle_high = 0, 360 - 360/angle_steps
 
-    best_angle, best_str = cp.asarray(0),cp.asarray(0)
+    xlen = images.shape[1]
+    str_steps = 8
+    str_low, str_high = 0, 1 / xlen
+
+    best_angle, best_str = 0, 0
     old_values = np.array((best_angle,best_str))
     new_values = np.array([np.inf, np.inf])
     i = 0
-    
-    while i < 1 or not drift_values_converged(old_values, new_values, tolerancy_percent=1):
-        print(
-            "Iteration #{}: Best guess: Angle: {}°, Strength: {:.2e}".format(
-            i, np.round(best_angle.item(), 2), np.round(best_str.item(), 5))
-            + "\nLimits: [{}°, {}°], [{:.2e}, {:.2e}]".format(
-                angle_limits_step[0].item(), 
-                (angle_limits_step[1] + angle_limits_step[2]).item(),
-                str_limits_step[0].item(),
-                (str_limits_step[1] + str_limits_step[2]).item()
-                ))
-        old_values = np.array([best_angle, best_str])
-        best_angle, best_str = get_best_angle_strength_shifts(
-            images,
-            scanangles,
-            angle_limits_step, 
-            str_limits_step,
-            normalize_correlation=normalize_correlation,
-            correlation_power=correlation_power
-        )
-        new_values = np.array([best_angle, best_str])
-        angle_limits_step = best_angle-angle_limits_step[2]/2, best_angle + angle_limits_step[2]/2, angle_limits_step[2] / 3
-        str_limits_step = best_str-str_limits_step[2]/2, best_str + str_limits_step[2]/2, str_limits_step[2] / 3
-        i += 1
-        if debug:
-            plt.ioff()
-            mean, _ = create_final_stack_and_average(images, scanangles, best_str, best_angle)
-            fig = plt.figure()
-            plt.imshow(mean)
-            #display.clear_output(wait=True)
-            display.display(plt.gcf())
-            plt.ion()
+
+    try:
+        while i < 2 or not drift_values_converged(old_values, new_values, tolerancy_percent=1):
+            if i == 0:
+                angle_steps = 16
+            else:
+                angle_steps = 8
+            angle_low, angle_high = 0, 360 - 360/angle_steps
+            print()
+            print("Iteration #{}: Best guess: Angle: {}°, Strength: {:.2e}".format(
+                i, np.round(best_angle, 2), np.round(best_str, 5))
+                + "\nLimits: [{:.1f}°, {:.1f}°], [{:.2e}, {:.2e}]".format(
+                    angle_low, angle_high, str_low, str_high))
+            old_values = np.array([best_angle, best_str])
+
+            drift_angles = cp.linspace(angle_low, angle_high, angle_steps) % 360
+            angle_diff = (drift_angles[1] - drift_angles[0]).item() % 360
+
+            drift_strengths = cp.linspace(str_low, str_high, str_steps)
+            str_diff = (drift_strengths[1] - drift_strengths[0]).item()
+
+            best_angle, best_str = get_best_angle_strength_shifts(
+                images,
+                scanangles,
+                drift_angles, 
+                drift_strengths,
+                normalize_correlation=normalize_correlation,
+                correlation_power=correlation_power
+            )
+            new_values = np.array([best_angle, best_str])
+            if debug:
+                warped_images_nonan = [
+                warp_image_cuda(
+                    img, 
+                    scanangle, 
+                    best_str, 
+                    best_angle,
+                    nan=False) for img, scanangle in zip(images, scanangles)]
+                fig = plt.figure(figsize=(6,3))
+                fig.clear()
+                ax1 = fig.add_subplot(121)
+                ax2 = fig.add_subplot(122)
+                ax1.imshow(warped_images_nonan[0].get())
+                ax2.imshow(warped_images_nonan[1].get())
+                fig.tight_layout()
+                fig.canvas.draw()
+
+
+            if best_str <= drift_strengths[1]:
+                print("Initial drift speed intervals were too large. Reducing.")
+                str_low = 0
+                str_high = 2*str_high / (str_steps-1)
+                continue
+
+            if i > 0 and best_angle in drift_angles[:1]:
+                print("Best angle is lower angle regime. Rotating drift by three steps.")
+                angle_low = (angle_low - 3*angle_diff) % 360
+                angle_high =  (angle_high - 3*angle_diff) % 360
+                continue
+
+            if i > 0 and best_angle in drift_angles[-2:]:
+                print("Best angle is lower angle regime. Rotating drift by three steps.")
+                angle_low = (angle_low + 3*angle_diff) % 360
+                angle_high =  (angle_high + 3*angle_diff) % 360
+                continue
+
+            if i % 2:
+                print("Adjusting drift strength limits")
+                str_low = best_str - 2*str_diff
+                str_high = best_str + 2*str_diff
+
+                if str_low < 0:
+                    str_low = 0
+            else:
+                print("Adjusting drift angle limits")
+                angle_low = best_angle - 2*angle_diff
+                angle_high = best_angle + 2*angle_diff
+
+            i += 1
+
+    except KeyboardInterrupt:
+        print(f"Aborted after {i} iterations")
+        pass
     print("Final iteration: Final guess: Angle: {}°, Strength: {:.2e}".format(
             np.round(best_angle, 2).item(), np.round(best_str, 5).item()
             ))
@@ -135,6 +194,12 @@ def hybrid_correlation(
     if normalize_mean:
         img1 -= img1.mean()
         img2 -= img2.mean()
+        #img1 /= img1.std()
+        #img2 /= img2.std()
+
+    padsize = img1.shape[0] // 5
+    img1 = cp.pad(img1, padsize)
+    img2 = cp.pad(img2, padsize)
 
     if hamming_filter:
         hamm = cp.hamming(img1.shape[0])
@@ -175,7 +240,9 @@ def hybrid_correlation_numpy(img1, img2, p=0.9, filter=True):
     return tuple(x for x in translation - center), corr.max()
 
 def translate(img, shift):
-    return cp.roll(img, shift, axis=(-2,-1))
+    sx, sy = shift
+    return affine_transform(img, swap_transform_standard(CupyAffine2D().translate(-sy, -sx).matrix), order=1)
+    #return cp.roll(img, shift, axis=(-2,-1))
     
 def drift_points(shape=(10,10), drift_deg = 0, drift_strength=0):
     lenX, lenY = shape
@@ -379,11 +446,14 @@ def warp_image(img, scanrotation, strength, drift_angle):
 def warp_and_correlate(images, scanangles, drift_angles, strengths, normalize_correlation=True, correlation_power=0.9):
     all_maxes = []
     pairs = []
+
     for ai, drift_angle in tqdm(
         enumerate(drift_angles), 
         desc="Iterating through drift angles", 
         total=len(drift_angles),
-        leave=False):
+        leave=True):
+        
+        angle_maxes = []
         for si, strength in tqdm(
             enumerate(strengths), 
             desc="Iterating through drift strengths", 
@@ -392,32 +462,52 @@ def warp_and_correlate(images, scanangles, drift_angles, strengths, normalize_co
             current_maxes = []
             current_shifts = []
             warped_imgA = warp_image_cuda(images[0], scanangles[0], strength, drift_angle)
-            for img, scanangle in tqdm(
-                zip(images[1:], scanangles[1:]), 
-                desc="Warping images", 
-                total=len(images[1:]),
-                leave=False):
+            
+            strength_maxes = []
+            for img, scanangle in zip(images[1:], scanangles[1:]):
                 warped_imgB = warp_image_cuda(img, scanangle, strength, drift_angle)
                 m = hybrid_correlation(warped_imgA, warped_imgB, fit_only=True, normalize_mean=normalize_correlation, p=correlation_power)
-                current_maxes.append(m.get())
-            all_maxes.append(current_maxes)
+                strength_maxes.append(m.get())
+            angle_maxes.append(strength_maxes)
             pairs.append((drift_angle, strength))
-    return all_maxes, pairs
+        all_maxes.append(angle_maxes)
+    return np.array(all_maxes), pairs
 
-def get_best_angle_strength_shifts(images, scanangles, angle_limits_step, strength_limits_step, normalize_correlation=True, correlation_power=0.9):
-    
-    low, high, step = angle_limits_step
-    low, high, step = low.item(), high.item(), step.item()
-    drift_angles = cp.arange(low, high+step, step) #% 360
-
-    low, high, step = strength_limits_step
-    low, high, step = low.item(), high.item(), step.item()
-    drift_strengths = cp.arange(low, high+step, step)
+def get_best_angle_strength_shifts(images, scanangles, drift_angles, drift_strengths, normalize_correlation=True, correlation_power=0.9):
     
     all_maxes, pairs = warp_and_correlate(images, scanangles, drift_angles, drift_strengths, normalize_correlation=normalize_correlation, correlation_power=correlation_power)
-    i = np.array(all_maxes).mean(1).argmax() # take the mean over each set of images
+    angle_fit = all_maxes.mean(axis=(1,2))
+    str_fit = all_maxes.mean(axis=(0,2))
+
+    #s, a = np.meshgrid(drift_strengths.get(), np.deg2rad(np.append(drift_angles.get(), 360)))
+    s, a = cp.meshgrid(drift_strengths*images[0].shape[0], np.deg2rad(drift_angles))
+    s, a = s.get(), a.get()
+    
+    m = all_maxes.mean(-1)
+    #m = np.append(m, m[0,None], axis=0)
+    #fig = plt.figure(figsize=(9,3))
+    fig = plt.gcf()
+    fig.clear()
+    ax1 = fig.add_subplot(131)
+    ax2 = fig.add_subplot(132)
+    ax3 = fig.add_subplot(133, projection="polar")
+    
+    ax1.scatter(drift_angles.get(), angle_fit)
+    ax2.plot(drift_strengths.get(), str_fit)
+    ax3.pcolormesh(a,s,m, shading="nearest", cmap='jet')
+    ax3.set_yticklabels([])
+    ax3.set_ylim(s.min(), s.max())
+    ax1.set_xlabel('Angles (°)')
+    ax2.set_xlabel('Drift Speed (A.U.)')
+    ax1.set_ylabel('Fit (Average over drift speeds)')
+    ax2.set_ylabel('Fit (Average over drift angles)')
+    fig.tight_layout()
+    fig.canvas.draw()
+
+    maxes = all_maxes.reshape((-1, len(images)-1)).mean(1)
+    i = maxes.argmax() # take the mean over each set of images
     best_drift_angle, best_drift_strength = pairs[i]
-    return best_drift_angle, best_drift_strength
+    return best_drift_angle.item(), best_drift_strength.item()
 
 def drift_values_converged(old_values, new_values, tolerancy_percent=1):
     tol = tolerancy_percent/100
@@ -549,7 +639,7 @@ class ImageModel:
         self.square = square
         self.margin = vacuum
         
-        self.create_probe_positions()
+        #self.create_probe_positions()
         self.create_probe_positions_cupy()
         self.create_parameters()
         self.create_parameters_cupy()
