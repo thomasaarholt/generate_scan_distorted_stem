@@ -11,6 +11,7 @@ from time import time
 from IPython import display
 import gc
 from scipy.signal.windows import tukey
+from scipy.optimize import curve_fit
 
 
 try:
@@ -22,6 +23,69 @@ except:
     print('No CuPy')
     cp = np
     from scipy.ndimage import affine_transform, zoom
+
+
+def Gaussian2DFunc(YX, A=1, x0=0, y0=0, sigma=5, offset=0):
+    y, x = YX
+    return A*np.exp(-((x-x0)**2 + (y-y0)**2)/(2*sigma**2)) + offset
+
+
+def estimate_center(difference_img, shift1, shift2, subpixel_radius):
+    "Gaussian curve fitting of difference image using in subpixel correlation"
+    S1, S2 = np.meshgrid(shift1, shift2)
+    parameters, _ = curve_fit(
+        Gaussian2DFunc, 
+        (S1.ravel(), S2.ravel()), 
+        difference_img.ravel(), 
+        p0 = (-1, 0, 0, subpixel_radius/2, difference_img.max()))
+    _, p1, p2,*_ = parameters
+    return (p1, p2), parameters
+    
+def subpixel_correlation_shift(img1, img2, rough_shift=(0,0), subpixel_radius=2.5, steps=11, debug=False):
+    "Returns the value of shift needed to be fed to shift img2 onto img1 using Model.translate"
+    rough1, rough2 = rough_shift
+    crop1 = abs(rough1) + subpixel_radius
+    crop2 = abs(rough1) + subpixel_radius
+    
+    img1_crop = img1[crop1:-crop1, crop2:-crop2]
+    img2_crop = img2[crop1:-crop1, crop2:-crop2]
+    
+    shift1 = np.linspace(-subpixel_radius, subpixel_radius, steps)
+    shift2 = np.linspace(-subpixel_radius, subpixel_radius, steps)
+
+    difference_img = cp.zeros((shift1.shape + shift2.shape))
+    for i1, d1 in enumerate(shift1):
+        for i2, d2 in enumerate(shift2):
+            img2_crop_b = translate(img2_crop, (rough1 + d1, rough2 + d2), cval=cp.nan)
+            mask = ~np.isnan(img2_crop_b) # only non-nan indices
+            diff = np.abs(img1_crop - img2_crop_b)[mask]
+            difference_img[i1, i2] = np.mean(diff)
+            
+    difference_img = difference_img.get()
+
+    (p1, p2), parameters = estimate_center(difference_img, shift1, shift2, subpixel_radius)
+    print(p1, p2)
+    i = np.argmin(difference_img)
+    i1, i2 = np.unravel_index(i, difference_img.shape)
+    S1, S2 = np.meshgrid(shift1, shift2)
+    p1, p2 = S1[i1, i2], S2[i1, i2]
+    print(p1, p2) 
+    plt.figure()
+    plt.imshow(difference_img, extent=(-subpixel_radius, subpixel_radius, -subpixel_radius, subpixel_radius))
+
+    shift = (rough1 + p1, rough2 + p2)
+    if debug:
+        plt.figure()
+        plt.imshow(difference_img, extent=(-subpixel_radius, subpixel_radius, subpixel_radius, -subpixel_radius))
+        plt.contour(S1, S2, Gaussian2D((S1, S2), *parameters), 8, colors='w')
+        print(f"Subpixel offsets: p1={round(p1,2)}, p2={round(p2, 2)}")
+    return shift
+
+def subpixel_correlation(img1, img2, subpixel_radius=2.5, steps=11):
+    "Estimates pixel shift using hybrid correlation, then manually compares the differences by subpixel translation of the image"
+    rough_shift, m = hybrid_correlation(img1, img2)
+    shift = subpixel_correlation_shift(img1, img2, rough_shift=rough_shift, subpixel_radius = subpixel_radius, steps=steps)
+    return shift
 
 def make_zero_zero(arr, eps=1e-13):
     "cos(np.deg2rad(90)) will return a nonzero value. This sets such small values to zero."
@@ -40,26 +104,19 @@ def get_atoms():
     del atoms[mask]
     atoms.rotate([1,0,0], (0,0,1))
 
-    atoms.numbers[1716] = 30
-    atoms.numbers[1766] = 30
+    atoms[1716].number = 80
+    atoms[1766].number = 80
     return atoms
 
-def get():
+def get(nImages=4, drift_strength=5, pixel_size = 0.1, maxScanAngle=360, minScanAngle=0, drift_angle=None, vacuum=10., jitter=0.,  ):
     atoms = get_atoms()
-
-    nImages = 4
-    pixel_size = 0.1
-    drift_strength = 5 # approx 10 -> becomes 10 / np.prod(image_shape)
-    jitter = 0.5
-    vacuum = 10.
-    #drift_vector = [1,1]
-    random_angle = np.random.random() * 2*np.pi
+    random_angle = drift_angle if drift_angle else np.random.random() * 2*np.pi
     drift_vector = [np.cos(random_angle),np.sin(random_angle)]
     centre_drift = True
     
     images = []
 
-    scanangles = cp.linspace(0, 360, nImages, endpoint=False)
+    scanangles = cp.linspace(minScanAngle, maxScanAngle, nImages, endpoint=False)
     for scanangle in tqdm(scanangles):
         m = ImageModel(atoms, scan_rotation=scanangle,
                     pixel_size=pixel_size, vacuum=vacuum,
@@ -75,8 +132,6 @@ def get():
     images = cp.stack(images)
     print(f"Size: {images.nbytes / 1e9} GB")
     print(f"Shape: {images.shape}")
-
-
     return images, scanangles, random_angle
 
 def create_final_stack_and_average(images, scanangles, best_str, best_angle, normalize_correlation = False, print_shifts = False):
@@ -84,7 +139,7 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle, nor
     images and the stack average.
     """
     warped_images_with_nan = [
-    warp_image_cuda(
+    warp_image(
         img, 
         scanangle, 
         best_str, 
@@ -100,7 +155,7 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle, nor
     #mean_image = warped_imgA / len(images)
     for warped_imgB in warped_images_nonan[1:]:
         shift, m = hybrid_correlation(warped_imgA, warped_imgB, normalize=normalize_correlation)
-        shifts.append(shift.get())
+        shifts.append(shift)
         #mean_image += translate(warped_imgB, shift)/len(images)
 
     warped_images2 = cp.stack(warped_images_with_nan[:1] + [translate(img, shift[::-1]) for img, shift in zip(warped_images_with_nan[1:], shifts)])
@@ -175,7 +230,7 @@ def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlatio
             new_values = np.array([best_angle, best_str])
             if debug:
                 warped_images_nonan = [
-                warp_image_cuda(
+                warp_image(
                     img, 
                     scanangle, 
                     best_str, 
@@ -277,7 +332,7 @@ def tukey_window(shape, alpha=0.1):
         filt2 = filt1
     else:
         filt2 = tukey(shape[1], alpha=0.1, sym=True)
-    return filt1[None] * filt2
+    return filt1[:, None] * filt2
 
 def hybrid_correlation(
     img1, 
@@ -329,9 +384,9 @@ def hybrid_correlation(
     corr = cp.fft.fftshift(corr)
     translation = cp.array(cp.unravel_index(corr.argmax(), corr.shape))
     center = (cp.array(corr.shape))// 2
-    return cp.stack([x for x in translation - center]), corr.max()
+    return np.stack([x.item() for x in translation - center]), corr.max()
 
-def translate(img, shift):
+def translate(img, shift, cval=0):
     sx, sy = shift
     return affine_transform(
         img,
@@ -339,7 +394,8 @@ def translate(img, shift):
             np.linalg.inv(
                 swap_transform_standard(
                     Affine2D().translate(sx, sy).get_matrix()))), 
-        order=1)
+        order=1,
+        cval=cval)
     
 def drift_points(shape=(10,10), drift_deg = 0, drift_strength=0):
     lenX, lenY = shape
@@ -429,13 +485,13 @@ def get_and_plot_peaks(data, average_distance_between_peaks=80, threshold = 1):
     return x, y
 
 def transform_drift_scan(scan_rotation_deg=0, drift_angle_deg=0, strength=0, xlen=100):
-    arr = cp.zeros(cp.shape(strength) + cp.shape(drift_angle_deg) + (3,3))
-    if cp.shape(strength):
+    arr = np.zeros(np.shape(strength) + np.shape(drift_angle_deg) + (3,3))
+    if np.shape(strength):
         strength = strength[:, None, None]
-    angle = cp.deg2rad(drift_angle_deg + scan_rotation_deg)
-    arr[...] = cp.eye(3)
-    s_sin = strength*make_zero_zero(cp.sin(angle))
-    s_cos = strength*make_zero_zero(cp.cos(angle))
+    angle = np.deg2rad(drift_angle_deg + scan_rotation_deg)
+    arr[...] = np.eye(3)
+    s_sin = strength*make_zero_zero(np.sin(angle))
+    s_cos = strength*make_zero_zero(np.cos(angle))
     arr[..., 0,0] = 1 - s_cos
     arr[..., 0,1] = -s_cos*xlen
     arr[..., 0,2] = -s_cos    
@@ -445,21 +501,21 @@ def transform_drift_scan(scan_rotation_deg=0, drift_angle_deg=0, strength=0, xle
     return arr.squeeze()
 
 def warp_and_shift_images(images, scanangles, drift_strength=0, drift_angle=0):
-    warped_images = [warp_image_cuda(img, scan, drift_strength, drift_angle) for img, scan in zip(images, scanangles)]
+    warped_images = [warp_image(img, scan, drift_strength, drift_angle) for img, scan in zip(images, scanangles)]
     translated_images = [warped_images[0]]
 
     shifts = [hybrid_correlation(warped_images[0], img)[0] for img in warped_images[1:]]
-    translated_images += [translate(img, shift.get()) for img, shift in zip(warped_images[1:], shifts)]
+    translated_images += [translate(img, shift) for img, shift in zip(warped_images[1:], shifts)]
     translated_images = cp.array(translated_images)
     #translated_images[translated_images == 0] = cp.nan
     return translated_images
 
-def warp_image_cuda(img, scanrotation_deg, strength, drift_angle_deg, nan=False):
+def warp_image(img, scanrotation_deg, drift_strength, drift_angle_deg, nan=False):
     shift_x, shift_y = (cp.array(img.shape) - 1) / 2
     main_transform = transform_drift_scan(
-         -scanrotation_deg, 
+         -scanrotation_deg.item(), 
          drift_angle_deg, 
-         strength, 
+         drift_strength, 
          img.shape[-2])
     T = (
     Affine2D().translate(-shift_x, -shift_y)
@@ -471,25 +527,6 @@ def warp_image_cuda(img, scanrotation_deg, strength, drift_angle_deg, nan=False)
         cp.linalg.inv(cp.asarray(swap_transform_standard(T.get_matrix()))),
         order=1,
         cval=cval)
-
-def warp_image(img, scanrotation, strength, drift_angle):
-    shift_x, shift_y = np.array(img.shape) / 2
-    T = transform_drift_scan(
-         scanrotation, 
-         drift_angle, 
-         strength, 
-         img.shape[0]) 
-    T = (
-    Affine2D()
-    .translate(-shift_x, -shift_y)
-    + Affine2D(T)
-    + Affine2D()
-    .rotate(-scanrotation)
-    .translate(shift_x, shift_y)
-    )
-    
-    return warp(img, np.linalg.inv(T.get_matrix()))
-
 
 def warp_and_correlate(images, scanangles, drift_angles, strengths, normalize_correlation=False, correlation_power=0.8):
     all_maxes = []
@@ -509,11 +546,11 @@ def warp_and_correlate(images, scanangles, drift_angles, strengths, normalize_co
             leave=False):
             current_maxes = []
             current_shifts = []
-            warped_imgA = warp_image_cuda(images[0], scanangles[0], strength, drift_angle)
+            warped_imgA = warp_image(images[0], scanangles[0], strength, drift_angle)
             
             strength_maxes = []
             for img, scanangle in zip(images[1:], scanangles[1:]):
-                warped_imgB = warp_image_cuda(img, scanangle, strength, drift_angle)
+                warped_imgB = warp_image(img, scanangle, strength, drift_angle)
                 m = hybrid_correlation(warped_imgA, warped_imgB, fit_only=True, normalize=normalize_correlation, p=correlation_power)
                 strength_maxes.append(m.get())
             angle_maxes.append(strength_maxes)
