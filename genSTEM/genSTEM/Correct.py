@@ -17,16 +17,16 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle, nor
     # 
 
     """
-    warped_images_with_nan = [
+    warped_images_with_nan = cp.stack([
         warp_image(
             img, 
             scanangle, 
             best_str, 
             best_angle,
             nan=True)
-        for img, scanangle in zip(images, scanangles)]
+        for img, scanangle in zip(images, scanangles)])
 
-    warped_images_nonan = cp.stack(warped_images_with_nan)
+    warped_images_nonan = warped_images_with_nan.copy()
     warped_images_nonan[cp.isnan(warped_images_nonan)] = 0
 
     warped_imgA = warped_images_nonan[0]
@@ -34,23 +34,24 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle, nor
     for warped_imgB in warped_images_nonan[1:]:
         shift, m = hybrid_correlation(warped_imgA, warped_imgB, normalize=normalize_correlation)
         shifts.append(shift)
+    shifts = cp.array(np.array(shifts))
 
-    warped_images2 = cp.stack(warped_images_with_nan[:1] + [translate(img, shift[::-1]) for img, shift in zip(warped_images_with_nan[1:], shifts)])
+
+    corrected_images = warped_images_with_nan.copy()
+    corrected_images[1:] =  cp.stack([translate(img, shift[::-1], cval=cp.nan) for img, shift in zip(warped_images_with_nan[1:], shifts)])
     
     if subpixel:
         subpixel_images = []
-        img1 = warped_images2[0].copy()
-        img1[np.isnan(img1)] = 0
-        for img in warped_images2[1:]:
-            img_nonan = img.copy()
-            img_nonan[np.isnan(img)] = 0
-            shift = subpixel_correlation(img1, img_nonan)
-            img2b = translate(img, shift)
+        img1 = warped_images_nonan[0].copy()
+        for img_nonan, img_nan, rough_shift in zip(warped_images_nonan[1:], warped_images_with_nan[1:], shifts):
+            shift = cp.asarray(subpixel_correlation(img1, img_nonan))
+            img2b = translate(img_nan, shift + rough_shift[::-1], cval=cp.nan)
             subpixel_images.append(img2b)
-        warped_images2[1:] = cp.stack(subpixel_images)
-    mean_image = cp.nanmean(warped_images2, axis=0)
+        warped_images_with_nan[1:] = cp.stack(subpixel_images)
+        corrected_images = warped_images_with_nan
+    mean_image = cp.nanmean(corrected_images, axis=0)
 
-    return asnumpy(mean_image)#, warped_images_nonan.get()
+    return asnumpy(mean_image)
     
 def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlation=True, debug=False, correlation_power=0.8):
     """Estimates the global, constant drift on an image using affine transformations.
@@ -82,8 +83,8 @@ def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlatio
     best_angle, best_str, fit_value = 0, 0, maxes.max()
     history = [(best_angle, best_str, fit_value)]
 
-    old_values = np.array((best_angle,best_str))
-    new_values = np.array([np.inf, np.inf])
+    old_values = fit_value
+    new_values = np.inf
     i = 0
     j = 0 # "extra" iterations when something just needed readjusting
     converged = False
@@ -96,7 +97,7 @@ def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlatio
                 i+j, np.round(best_angle, 2), np.round(best_str, 5), fit_value)
                 + "\nLimits: [{:.1f}°, {:.1f}°], [{:.2e}, {:.2e}]".format(
                     angle_low % 360, angle_high % 360, str_low, str_high))
-            old_values = np.array([best_angle, best_str])
+            old_values = new_values
 
             if angle_low > angle_high:
                 print("ANGLE LOW WAS HIGHER")
@@ -118,7 +119,7 @@ def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlatio
                 image_number=i+j,
             )
             history.append((best_angle, best_str, fit_value))
-            new_values = np.array([best_angle, best_str])
+            new_values = fit_value
 
             if debug:
                 warped_images_nonan = [
@@ -182,8 +183,6 @@ def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlatio
 
             i += 1
             converged_for_two_iterations = converged 
-            print(new_values)
-            print(tolerancy_percent)
             converged = drift_values_converged(old_values, new_values, tolerancy_percent=tolerancy_percent)
             converged_for_two_iterations = converged_for_two_iterations and converged
 
@@ -209,9 +208,6 @@ def hybrid_correlation(
     fit_only = False,
     ):
     """Performs hybrid correlation on two images.
-    for higher performance, allows the option to already
-    have performed the fft on the inputs.
-    Seems to work fine with the real-input `rfft`.
 
     fit_only will only return the correlation maximum value, 
     not the required shift.
@@ -242,14 +238,14 @@ def hybrid_correlation(
     fftimg2 = cp.fft.rfft2(img2)
     
     m = fftimg1 * cp.conj(fftimg2)
-    corr =  (cp.fft.irfft2(cp.abs(m)**p * cp.exp(1j * cp.angle(m))))
+    corr =  cp.fft.irfft2(cp.abs(m)**p * cp.exp(1j * cp.angle(m)))
 
     if fit_only:
         return corr.max()
 
     corr = cp.fft.fftshift(corr)
     translation = cp.array(cp.unravel_index(corr.argmax(), corr.shape))
-    center = (cp.array(corr.shape))// 2
+    center = cp.array(corr.shape) // 2
     return [x.item() for x in translation - center], corr.max()
 
 def translate(img, shift, cval=0):
@@ -269,8 +265,8 @@ def transform_drift_scan(scan_rotation_deg=0, drift_angle_deg=0, speed=0, xlen=1
         speed = speed[:, None, None]
     angle = np.deg2rad(drift_angle_deg + scan_rotation_deg)
     arr[...] = np.eye(3)
-    s_sin = speed*make_zero_zero(np.sin(angle)) # used to use make_zero_zero on this, but it breaks it?
-    s_cos = speed*make_zero_zero(np.cos(angle))
+    s_sin = speed*(np.sin(angle)) # used to use make_zero_zero on this, but it breaks it?
+    s_cos = speed*(np.cos(angle))
     arr[..., 0,0] = 1 - s_cos
     arr[..., 0,1] = -s_cos*xlen
     arr[..., 0,2] = -s_cos    
@@ -286,19 +282,18 @@ def warp_and_shift_images(images, scanangles, drift_speed=0, drift_angle=0):
     shifts = [hybrid_correlation(warped_images[0], img)[0] for img in warped_images[1:]]
     translated_images += [translate(img, shift[::-1]) for img, shift in zip(warped_images[1:], shifts)]
     translated_images = cp.array(translated_images)
-    #translated_images[translated_images == 0] = cp.nan
     return translated_images
 
 def warp_image(img, scanrotation_deg, drift_speed, drift_angle_deg, nan=False):
-    shift_x, shift_y = (cp.array(img.shape) - 1) / 2
+    shift1, shift2 = (cp.array(img.shape) - 1) / 2
     main_transform = transform_drift_scan(
          -scanrotation_deg, 
          drift_angle_deg, 
          drift_speed, 
          img.shape[-2])
     T = (
-    Affine2D().translate(-shift_x, -shift_y)
-    + Affine2D(main_transform).rotate_deg(scanrotation_deg).translate(shift_x, shift_y)
+    Affine2D().translate(-shift1, -shift2)
+    + Affine2D(main_transform).rotate_deg(scanrotation_deg).translate(shift1, shift2)
     )
     cval = cp.nan if nan else 0 # value of pixels that were outside the image border
     return affine_transform(
@@ -378,14 +373,10 @@ def get_best_angle_speed_shifts(images, scanangles, drift_angles, drift_speeds, 
 
 def drift_values_converged(old_values, new_values, tolerancy_percent=1):
     tol = tolerancy_percent/100
-    return (
-        (new_values >= old_values - old_values*tol) 
-        & 
-        (new_values <= old_values + old_values*tol)
-    ).all()
+    return old_values * (1 + tol) >= new_values >= old_values * (1 - tol)
 
 def subpixel_correlation_shift(img1, img2, rough_shift=(0,0), subpixel_radius=1, steps=11, window=True, window_strength=0.8, debug=False):
-    "Returns the value of shift needed to be fed to shift img2 onto img1 using Model.translate"
+    "Returns the value of shift needed to be fed to shift img2 onto img1 using Correct.translate"
     rough1, rough2 = rough_shift
     if window:
         window = cp.asarray(tukey_window(img1.shape, window_strength))
@@ -415,6 +406,7 @@ def subpixel_correlation_shift(img1, img2, rough_shift=(0,0), subpixel_radius=1,
     p1, p2 = shift1[i1], shift2[i2]
     shift = (rough1 + p1, rough2 + p2)
     if debug:
+        S1, S2 = np.meshgrid(shift1, shift2)
         plt.figure()
         plt.imshow(difference_img, extent=(-subpixel_radius, subpixel_radius, subpixel_radius, -subpixel_radius))
         plt.contour(S1, S2, Gaussian2DFunc((S1, S2), *parameters), 8, colors='w')

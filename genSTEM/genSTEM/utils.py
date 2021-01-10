@@ -3,7 +3,7 @@ from scipy.optimize import curve_fit
 from scipy.signal.windows import tukey
 
 try:
-    #raise ValueError()
+    #raise ValueError() # Uncomment this to test numpy-version on cupy-enabled systems
     import cupy as cp
     asnumpy = cp.asnumpy
     from cupyx.scipy.ndimage import affine_transform, zoom
@@ -35,7 +35,7 @@ def tukey_window(shape, alpha=0.1):
     if shape[0] == shape[1]:
         filt2 = filt1
     else:
-        filt2 = tukey(shape[1], alpha=alpha1, sym=True)
+        filt2 = tukey(shape[1], alpha=alpha, sym=True)
     return filt1[:, None] * filt2
 
 
