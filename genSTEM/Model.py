@@ -10,7 +10,8 @@ import scipy.ndimage.filters as filters
 
 from .utils import cp, asnumpy
 
-def get_atoms():
+def get_example_atoms():
+    '''Get atom from example file.'''
     from ase.io import read
     from ase.build import make_supercell
     atoms = read("0013687130_v6bxv2_tv0.1bxv0.0_d1.8z_traj.xyz")
@@ -23,10 +24,41 @@ def get_atoms():
     atoms[1766].number = 80
     return atoms
 
-def get(atoms = None, nImages=4, drift_speed=5, pixel_size = 0.1, minScanAngle=0, maxScanAngle=360, drift_angle=None, vacuum=10., jitter=0.,  ):
-    "Quickly generate images of a atoms object taken at various scan angles"
+def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, minScanAngle=0, maxScanAngle=360, drift_speed=5, drift_angle=None, jitter_strength=0., **kwargs):
+    '''Quickly generate images of a atoms object taken at various scan angles.
+    
+    Paramaters
+    ----------
+    atoms: :class:`ase.Atoms`
+        ASE Atoms object descirbing the crystal structure along the viewing direction.
+    vacuum: float
+        Vacuum padding in Å. Add whitespace around image.
+    pixel_size: float
+        Pixel dimensions in Å. Affects image resolution.
+    
+    nImages: int
+        Number of images in the rotation series which will have uniform scan rotations between minScanAngle and maxScanAngle.
+    minScanAngle: float, int
+        Minimum scan rotation angle of the fast-scan direction in degrees.
+    maxScanAngle: float, int
+        Maximum scan rotation angle of the fast-scan direction in degrees.
+    
+    drift_speeed: int.
+        Total drift speed in units of drift_pixels/total_image_pixels.
+    drift_angle: float, int
+        Angle of drift in degrees.  This provides the angle of the unit vector provided to ImageModel.
+    jitter_strength: float
+        Shifts each scanline by a random factor.
+    **kwargs
+        Additional parameters accepted by ImageModel.
+    
+    Returns
+    -------
+    np.array(dtype=float)
+        Rotation image series as a numpy array.
+    '''
     if atoms is None:
-        atoms = get_atoms()
+        atoms = get_example_atoms()
     
     if drift_angle is None:
         random_angle = np.random.random() * 2*np.pi
@@ -43,9 +75,9 @@ def get(atoms = None, nImages=4, drift_speed=5, pixel_size = 0.1, minScanAngle=0
                     pixel_size=pixel_size, vacuum=vacuum,
                         drift_speed=drift_speed, 
                         drift_vector=drift_vector,
-                        jitter_strength=jitter, 
+                        jitter_strength=jitter_strength, 
                         centre_drift=centre_drift,
-                        fast=False,
+                        fast=False, **kwargs
                     )
         img = m.generate()
         side = np.minimum(*img.shape)
@@ -55,11 +87,26 @@ def get(atoms = None, nImages=4, drift_speed=5, pixel_size = 0.1, minScanAngle=0
     print(f"Shape: {images.shape}")
     return images, scanangles, random_angle
     
-def drift_points(shape=(10,10), drift_deg = 0, drift_speed=0):
+def drift_points(shape=(10,10), drift_speed=0, drift_angle = 0):
+    '''Calculate pixel coordinates for an image with uniform drift.
+    
+    Paramaters
+    ----------
+    shape: tuple of int
+        Shape of image array.
+    drift_speeed: int.
+        Total drift speed in units of drift_pixels/total_image_pixels.
+    drift_angle: float, int
+        Angle of drift in degrees.  This provides the angle of the unit vector provided to ImageModel.
+        
+    Returns
+    -------
+    ndarray of new pixel coordinates after drift.
+    '''
     lenX, lenY = shape
-    drift_vector = (rotation_matrix(drift_deg) @ [1,0]) * drift_speed
-    arr = np.zeros((lenX, lenY, 2))
+    drift_vector = (rotation_matrix(drift_angle) @ [1,0]) * drift_speed
     drift = np.zeros(2)
+    arr = np.zeros((lenX, lenY, 2))
     for yi in range(lenY):
         for xi in range(lenX):
             drift += drift_vector
@@ -67,10 +114,24 @@ def drift_points(shape=(10,10), drift_deg = 0, drift_speed=0):
             arr[xi, yi] = position - drift
     return arr
 
-def drift_pointsYX(shape=(10,10), drift_deg = 0, drift_speed=0):
-    "Rotate drift from along x axis, anticlockwise in degrees"
+def drift_pointsYX(shape=(10,10), drift_angle = 0, drift_speed=0):
+    '''Calculate pixel coordinates for an image with uniform drift.
+    
+    Paramaters
+    ----------
+    shape: tuple of int
+        Shape of image array.
+    drift_speeed: int.
+        Total drift speed in units of drift_pixels/total_image_pixels.
+    drift_angle: float, int
+        Angle of drift in degrees.  This provides the angle of the unit vector provided to ImageModel.
+        
+    Returns
+    -------
+    ndarray of new pixel coordinates after drift.
+    '''
     lenY, lenX = shape
-    drift_vector = (rotation_matrix(drift_deg) @ [1,0]) * drift_speed
+    drift_vector = (rotation_matrix(drift_angle) @ [1,0]) * drift_speed
     drift = np.zeros(2)
     positions = []
     for yi in range(lenY):
@@ -136,6 +197,23 @@ def get_and_plot_peaks(data, average_distance_between_peaks=80, threshold = 1):
 
 
 def Gaussian2D(x, y, A, xc, yc, sigma):
+    '''Creates a symetric 2d-Gaussian.
+    
+    Paramaters
+    ----------
+    x,y: ndarray
+        Spatial coordiantes.
+    A: float, int
+        Amplitude
+    xc, yc: float, int
+        Gaussian center position.
+    sigma: float, int
+        Standard deviation.
+    
+    Returns
+    -------
+    ndarray of gaussian intensity
+    '''
     return A*cp.exp(
         -(
             (x-xc)**2 + 
@@ -164,13 +242,48 @@ def add_ac_noise(shape, strength=0.5, dwelltime=1e-6, ac_freq=50):
     ).reshape(shape)
     return noise
     
-def add_drift(shape, drift_vector = [1,0], speed=1e-4):
-    speed /= np.prod(shape)
-    vector = -cp.array(drift_vector)
-    probe_indices = cp.arange(cp.prod(cp.array(shape))).reshape(shape)
-    return (speed * vector * probe_indices.T[..., None]).T
+def add_drift(XYshape, drift_vector = [1,0], drift_speed=1e-4):
+    '''Provide the pixel cordinate shift as a result of drift.
+    
+    Paramaters
+    ----------
+    XYshape: tuple of int
+        Shape of the probe positions. (2, X, Y)
+    drift_vector: length-2 vector
+        Direction of drift.
+    drift_speed: float
+        Drift speed in number of pixels.
+        Automatically divided by total number of images pixels within the function.
+        Should be 0-10.
+    
+    Returns
+    -------
+    ndarray of pixel shift after drift.
+    '''
+    drift_speed /= np.prod(XYshape) #total number of pixels
+    drift_vector = -cp.array(drift_vector)
+    probe_indices = cp.arange(cp.prod(cp.array(XYshape))).reshape(XYshape)
+    return (drift_speed * drift_vector * probe_indices.T[..., None]).T
 
 def add_line_jitter(XYshape, strength = 0.3, horizontal=True, vertical=False, ):
+    '''Shift pixel rows and columns to simulate jittering in a STEM image.
+    
+    Paramaters
+    ----------
+    XYshape: tuple of int
+        Shape of probe positions. (2, X, Y)
+    strength: float, int
+        Strength of jitter.
+        Applied to each row or column as :math:`strength*(2*random_number-1)` such that the pixel shift is in the interval [strength, strength).
+    horizontal: bool
+        Add jitter along the horizontal direction.
+    vertical: bool
+        Add jitter along the vertical direction.
+        
+    Returns
+    -------
+    ndarray of pixel shift after jitter.
+    '''
     jitter = cp.zeros(XYshape) # Shape is (2, X, Y)
     if type(strength) == tuple:
         strengthx = strength[0]
@@ -189,23 +302,36 @@ class ImageModel:
     Images are generated by placing a 2D gaussian on each atom XY position.
     If a list of positions and numbers, positions should have shape (N, 2) and numbers shape (N,)
     
-    Can add features like:
+    Paramaters
+    ----------
+    scan_rotation: float, int
+        Angle of the fast-scan direction in degrees.
+    drift_speed: float
+        Automatically divided by image shape - should be 0-10.
+    drift_vector: length-2 vector
+        Direction of drift.
+    pixel_size: float
+        Pixel dimensions in Å. Affects image resolution.
 
-    scan_rotation: deg
-    drift_speed: float, Automatically divided by image shape - should be 0-10
-    drift_vector: length-2 vector. Direction of drift
-    pixel_size: float, Å, Affects to image resolution
+    jitter_strength: float
+        Shifts each scanline by a random factor.
+    jitter_horizontal: bool
+        Shift scanline leftright by above.
+    jitter_vertical: bool
+        Shift scnaline updown by above.
+    sigma: float
+        Standard deviation of 2D gaussian representing atomic columns.
+    power: float
+        HAADF n-factor - ~1.4-2.0
 
-    jitter_strength: float, shifts each scanline by a random factor
-    jitter_horizontal: bool, shift scanline leftright by above
-    jitter_vertical: bool, shift scnaline updown by above
-    sigma: float, standard deviation of 2D gaussian representing atomic columns
-    power: float, HAADF n-factor - ~1.4-2.0
-
-    centre_drift: bool, Shift image borders so drifted image is centered
-    square: bool, Make image square
-    vacuum: float, Å, Add whitespace around image
-    fast: bool, Only compute one layer of unique atoms
+    centre_drift: bool
+        Shift image borders so drifted image is centered.
+    square: bool
+        Make image square.
+    vacuum: float
+        Vacuum padding in Å. Add whitespace around image.
+    fast: bool
+        Only compute one layer of unique atoms
     """
 
     def __init__(
@@ -264,6 +390,7 @@ class ImageModel:
         self.model = model
 
     def create_probe_positions(self):
+        '''Create probe positions with experimental artifacts.'''
         xlow, ylow = self.atom_positions.min(0) - self.margin
         xhigh, yhigh = self.atom_positions.max(0) + self.margin
         scale = (xhigh - xlow)/100
@@ -302,6 +429,7 @@ class ImageModel:
                 self.probe_positions -= cp.array([offsetx, offsety])[:, None, None] / 2
         
     def create_parameters(self):
+        '''Create the paramaters that will describe the 2D-Gaussian distribution asigned to atoms.'''
         xc, yc = self.atom_positions.T
         A = self.atom_numbers ** self.power
         sigma = np.ones(self.number_of_atoms) * self.sigma
