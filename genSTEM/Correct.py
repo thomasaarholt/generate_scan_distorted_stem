@@ -15,7 +15,7 @@ def create_final_stack_and_average(images, scan_angles, best_str, best_angle, no
     # Correct Shifts
     # 
     
-    Paramaters
+    Parameters
     ----------
     images: ndarray
         Stack of images to use for reconstruction.
@@ -272,9 +272,9 @@ def translate(img, shift, cval=0):
         cval=cval)
 
 def transform_drift_scan(scan_angle=0, drift_angle=0, drift_speed=0, xlen=100):
-    '''Generates the transformation matrix, T, which includes the transfromation from scann rotation,Tr, and drift, Tt.
+    '''Generates the transformation matrix, T, which includes the transformation from scan rotation, Tr, and drift, Tt.
     
-    Paramaters
+    Parameters
     ----------
     scan_angles: float, int
         Scan rotation angles for the stack of images in degrees.
