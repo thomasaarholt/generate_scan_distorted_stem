@@ -264,6 +264,7 @@ def add_drift(XYshape, drift_vector = [1,0], drift_speed=1e-4):
     drift_vector = -cp.array(drift_vector)
     probe_indices = cp.arange(cp.prod(cp.array(XYshape))).reshape(XYshape)
     return (drift_speed * drift_vector * probe_indices.T[..., None]).T
+    
 
 def add_line_jitter(XYshape, strength = 0.3, horizontal=True, vertical=False, ):
     '''Shift pixel rows and columns to simulate jittering in a STEM image.

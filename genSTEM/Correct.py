@@ -9,13 +9,28 @@ from time import time
 
 
 def create_final_stack_and_average(images, scanangles, best_str, best_angle, normalize_correlation = False, print_shifts = False, subpixel=False):
-    """From an estimated drift speed and angle, produce a stack of transformed 
-    images and the stack average.
+    """From an estimated drift speed and angle, produce a stack of transformed images and the stack average.
 
     # First warp images
     # Correct Shifts
     # 
-
+    
+    Paramaters
+    ----------
+    images: ndarray
+        Stack of images to use for reconstruction.
+    scanangles: float, int
+        Scan rotation angles for the stack of images.
+    best_str:
+        
+    best_angle:
+        
+    normalize_correlation:
+        
+    print_shifts:
+        
+    subpixel:
+        
     """
     warped_images_with_nan = cp.stack([
         warp_image(
@@ -258,6 +273,7 @@ def translate(img, shift, cval=0):
 
 def transform_drift_scan(scan_rotation_deg=0, drift_angle_deg=0, speed=0, xlen=100):
     arr = np.zeros(np.shape(speed) + np.shape(drift_angle_deg) + (3,3))
+    print(arr.shape)
     if np.shape(speed):
         speed = speed[:, None, None]
     angle = np.deg2rad(drift_angle_deg + scan_rotation_deg)
@@ -281,16 +297,16 @@ def warp_and_shift_images(images, scanangles, drift_speed=0, drift_angle=0):
     translated_images = cp.array(translated_images)
     return translated_images
 
-def warp_image(img, scanrotation_deg, drift_speed, drift_angle_deg, nan=False):
+def warp_image(img, scanrotation, drift_speed, drift_angle, nan=False):
     shift1, shift2 = (cp.array(img.shape) - 1) / 2
     main_transform = transform_drift_scan(
-         -scanrotation_deg, 
-         drift_angle_deg, 
+         -scanrotation, 
+         drift_angle, 
          drift_speed, 
          img.shape[-2])
     T = (
     Affine2D().translate(-shift1, -shift2)
-    + Affine2D(main_transform).rotate_deg(scanrotation_deg).translate(shift1, shift2)
+    + Affine2D(main_transform).rotate_deg(scanrotation).translate(shift1, shift2)
     )
     cval = cp.nan if nan else 0 # value of pixels that were outside the image border
     return affine_transform(
