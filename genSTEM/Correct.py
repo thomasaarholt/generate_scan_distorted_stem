@@ -391,7 +391,6 @@ def get_best_angle_speed_shifts(images, scan_angles, drift_angles, drift_speeds,
     ax2.set_ylabel('Fit (Average over drift angles)')
     fig.tight_layout()
     fig.canvas.draw()
-    fig.savefig('thomas_{:02d}.png'.format(image_number))
     return best_drift_angle, best_drift_speed, maxes[i]
 
 def drift_values_converged(old_values, new_values, tolerancy_percent=1):
@@ -441,3 +440,4 @@ def subpixel_correlation(img1, img2, subpixel_radius=2.5, steps=11, window=True,
     rough_shift, m = hybrid_correlation(img1, img2)
     shift = subpixel_correlation_shift(img1, img2, rough_shift=rough_shift, subpixel_radius = subpixel_radius, steps=steps, window=window, window_strength=window_strength)
     return shift
+

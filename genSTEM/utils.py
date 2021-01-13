@@ -72,11 +72,3 @@ def swap_transform_standard(T):
     T[:2,:2] = T[:2,:2][::-1,::-1]
     T[:2, 2] = T[:2, 2][::-1]
     return T
-
-def arr2fft(img):
-    import hyperspy.api as hs
-    img = img.copy()
-    img[np.isnan(img)] = 0
-    s = hs.signals.Signal2D(img)
-    s = np.log(s.fft(True, True).amplitude)
-    return s

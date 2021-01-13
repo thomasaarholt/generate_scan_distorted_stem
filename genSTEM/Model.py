@@ -10,18 +10,21 @@ import scipy.ndimage.filters as filters
 
 from .utils import cp, asnumpy
 
-def get_example_atoms():
-    '''Get atom from example file.'''
-    from ase.io import read
+def get_atoms():
+    "Simple interesting-looking structure for testing"
+    from ase.spacegroup import crystal
     from ase.build import make_supercell
-    atoms = read("0013687130_v6bxv2_tv0.1bxv0.0_d1.8z_traj.xyz")
-    atoms = make_supercell(atoms, np.diag((1,2,1)))
-    mask = atoms.positions[:,2] > 35
-    del atoms[mask]
-    atoms.rotate([1,0,0], (0,0,1))
 
-    atoms[1716].number = 80
-    atoms[1766].number = 80
+    a = 9.04
+    skutterudite = crystal(('Co', 'Sb'),
+                        basis=[(0.25, 0.25, 0.25), (0.0, 0.335, 0.158)],
+                        spacegroup=204,
+                        cellpar=[a, a, a, 90, 90, 90])
+
+    atoms = make_supercell(skutterudite, np.diag([4,4,1]))
+    atoms.numbers[330] = 80
+    atoms.numbers[331] = 80
+    atoms.numbers[346] = 80
     return atoms
 
 def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, minScanAngle=0, maxScanAngle=360, drift_speed=5, drift_angle=None, jitter_strength=0., **kwargs):
@@ -156,6 +159,7 @@ def plot(points, ax, lim=((),())):
         ax.set_ylim(lim[1])  
         
 def extend_3D_ones(arr_of_2d):
+    "Supports cp as well!"
     return np.hstack([arr_of_2d, np.ones((len(arr_of_2d),1))])
     
 def get_matrix(xy, xyprime):
@@ -165,6 +169,7 @@ def get_matrix(xy, xyprime):
     return T.T
 
 def transform_points(points, transform):
+    "Supports cp as well!"
     points = extend_3D_ones(points)
     points_prime = points @ transform
     return points_prime[:, :2]
@@ -430,7 +435,7 @@ class ImageModel:
                 self.probe_positions -= cp.array([offsetx, offsety])[:, None, None] / 2
         
     def create_parameters(self):
-        '''Create the paramaters that will describe the 2D-Gaussian distribution asigned to atoms.'''
+        'Create the paramaters that will describe the 2D-Gaussian distribution asigned to atoms.'
         xc, yc = self.atom_positions.T
         A = self.atom_numbers ** self.power
         sigma = np.ones(self.number_of_atoms) * self.sigma
