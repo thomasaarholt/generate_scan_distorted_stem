@@ -8,7 +8,7 @@ from tqdm.auto import tqdm
 from time import time
 
 
-def create_final_stack_and_average(images, scanangles, best_str, best_angle, normalize_correlation = False, print_shifts = False, subpixel=False):
+def create_final_stack_and_average(images, scan_angles, best_str, best_angle, normalize_correlation = False, print_shifts = False, subpixel=False):
     """From an estimated drift speed and angle, produce a stack of transformed images and the stack average.
 
     # First warp images
@@ -19,8 +19,8 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle, nor
     ----------
     images: ndarray
         Stack of images to use for reconstruction.
-    scanangles: float, int
-        Scan rotation angles for the stack of images.
+    scan_angles: list or array of float, int
+        Scan rotation angles for the stack of images in degrees.
     best_str:
         
     best_angle:
@@ -39,7 +39,7 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle, nor
             best_str, 
             best_angle,
             nan=True)
-        for img, scanangle in zip(images, scanangles)])
+        for img, scanangle in zip(images, scan_angles)])
 
     warped_images_nonan = warped_images_with_nan.copy()
     warped_images_nonan[cp.isnan(warped_images_nonan)] = 0
@@ -68,9 +68,9 @@ def create_final_stack_and_average(images, scanangles, best_str, best_angle, nor
 
     return asnumpy(mean_image)
     
-def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlation=True, debug=False, correlation_power=0.8):
+def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlation=True, debug=False, correlation_power=0.8):
     """Estimates the global, constant drift on an image using affine transformations.
-    Takes as input a list of images and scanangles. Only tested with square images.
+    Takes as input a list of images and scan angles. Only tested with square images.
 
     Explores the space of possible transformations in 360 degree directions and drift 
     speeds that don't result in shears or stretches out of the image.
@@ -89,7 +89,7 @@ def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlatio
     print("Getting fit with no drift first")
     all_maxes, pairs = warp_and_correlate(
         images, 
-        scanangles, 
+        scan_angles, 
         [0], [0], 
         normalize_correlation=normalize_correlation, 
         correlation_power=correlation_power)
@@ -123,7 +123,7 @@ def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlatio
 
             best_angle, best_str, fit_value = get_best_angle_speed_shifts(
                 images,
-                scanangles,
+                scan_angles,
                 drift_angles, 
                 drift_speeds,
                 normalize_correlation=normalize_correlation,
@@ -140,7 +140,7 @@ def estimate_drift(images, scanangles, tolerancy_percent=1, normalize_correlatio
                     scanangle, 
                     best_str, 
                     best_angle,
-                    nan=False) for img, scanangle in zip(images, scanangles)]
+                    nan=False) for img, scanangle in zip(images, scan_angles)]
                 fig = plt.figure(figsize=(6,3))
                 fig.clear()
                 ax1 = fig.add_subplot(121)
@@ -271,15 +271,25 @@ def translate(img, shift, cval=0):
         order=1,
         cval=cval)
 
-def transform_drift_scan(scan_rotation_deg=0, drift_angle_deg=0, speed=0, xlen=100):
-    arr = np.zeros(np.shape(speed) + np.shape(drift_angle_deg) + (3,3))
-    print(arr.shape)
-    if np.shape(speed):
-        speed = speed[:, None, None]
-    angle = np.deg2rad(drift_angle_deg + scan_rotation_deg)
+def transform_drift_scan(scan_angle=0, drift_angle=0, drift_speed=0, xlen=100):
+    '''Generates the transformation matrix, T, which includes the transfromation from scann rotation,Tr, and drift, Tt.
+    
+    Paramaters
+    ----------
+    scan_angles: float, int
+        Scan rotation angles for the stack of images in degrees.
+    drift_angle: float, int
+        Angle of drift in degrees.
+    drift_speed: float, int
+        
+    '''
+    arr = np.zeros(np.shape(drift_speed) + np.shape(drift_angle) + (3,3))
+    if np.shape(drift_speed):
+        drift_speed = drift_speed[:, None, None]
+    angle = np.deg2rad(drift_angle + scan_angle)
     arr[...] = np.eye(3)
-    s_sin = speed*(np.sin(angle)) # used to use make_zero_zero on this, but it breaks it?
-    s_cos = speed*(np.cos(angle))
+    s_sin = drift_speed*(np.sin(angle)) # used to use make_zero_zero on this, but it breaks it?
+    s_cos = drift_speed*(np.cos(angle))
     arr[..., 0,0] = 1 - s_cos
     arr[..., 0,1] = -s_cos*xlen
     arr[..., 0,2] = -s_cos    
@@ -288,8 +298,8 @@ def transform_drift_scan(scan_rotation_deg=0, drift_angle_deg=0, speed=0, xlen=1
     arr[..., 1,2] = -s_sin
     return arr.squeeze()
 
-def warp_and_shift_images(images, scanangles, drift_speed=0, drift_angle=0):
-    warped_images = [warp_image(img, scan, drift_speed, drift_angle) for img, scan in zip(images, scanangles)]
+def warp_and_shift_images(images, scan_angles, drift_speed=0, drift_angle=0):
+    warped_images = [warp_image(img, scan, drift_speed, drift_angle) for img, scan in zip(images, scan_angles)]
     translated_images = [warped_images[0]]
 
     shifts = [hybrid_correlation(warped_images[0], img)[0] for img in warped_images[1:]]
@@ -315,7 +325,7 @@ def warp_image(img, scanrotation, drift_speed, drift_angle, nan=False):
         order=1,
         cval=cval)
 
-def warp_and_correlate(images, scanangles, drift_angles, speeds, normalize_correlation=False, correlation_power=0.8):
+def warp_and_correlate(images, scan_angles, drift_angles, speeds, normalize_correlation=False, correlation_power=0.8):
     all_maxes = []
     pairs = []
 
@@ -333,10 +343,10 @@ def warp_and_correlate(images, scanangles, drift_angles, speeds, normalize_corre
             leave=False):
             current_maxes = []
             current_shifts = []
-            warped_imgA = warp_image(images[0], scanangles[0], speed, drift_angle)
+            warped_imgA = warp_image(images[0], scan_angles[0], speed, drift_angle)
             
             speed_maxes = []
-            for img, scanangle in zip(images[1:], scanangles[1:]):
+            for img, scanangle in zip(images[1:], scan_angles[1:]):
                 warped_imgB = warp_image(img, scanangle, speed, drift_angle)
                 m = hybrid_correlation(warped_imgA, warped_imgB, fit_only=True, normalize=normalize_correlation, p=correlation_power)
                 speed_maxes.append(m.item())
@@ -345,9 +355,9 @@ def warp_and_correlate(images, scanangles, drift_angles, speeds, normalize_corre
         all_maxes.append(angle_maxes)
     return np.array(all_maxes), np.array(pairs)
 
-def get_best_angle_speed_shifts(images, scanangles, drift_angles, drift_speeds, normalize_correlation=False, correlation_power=0.8, image_number=0):
+def get_best_angle_speed_shifts(images, scan_angles, drift_angles, drift_speeds, normalize_correlation=False, correlation_power=0.8, image_number=0):
     
-    all_maxes, pairs = warp_and_correlate(images, scanangles, drift_angles, drift_speeds, normalize_correlation=normalize_correlation, correlation_power=correlation_power)
+    all_maxes, pairs = warp_and_correlate(images, scan_angles, drift_angles, drift_speeds, normalize_correlation=normalize_correlation, correlation_power=correlation_power)
     angle_fit = all_maxes.mean(axis=(1,2))
     str_fit = all_maxes.mean(axis=(0,2))
 
