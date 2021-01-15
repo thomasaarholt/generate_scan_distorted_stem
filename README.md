@@ -2,6 +2,8 @@
 This packages generates images of atomic structures as a function of scan rotation angle. It pretends to be a Scanning Transmission Electron Microscope (STEM). 
 The images are not proper STEM-simulations, just a HAADF approximation using two-dimensional gaussians.
 
+![Alt text](images/Generated.png?raw=true "Generate_images")
+
 As input it can take an ASE atoms object or a list of 2D/3D positions and atomic numbers, and creates images as a function of:
 - scan rotation angle
 - drift in the XY plane at various strengths
@@ -25,3 +27,6 @@ conda create --name stem numpy matplotlib scipy tqdm notebook ipympl # jupyterla
 conda activate stem
 pip install https://github.com/thomasaarholt/generate_scan_distorted_stem/archive/main.zip
 ```
+
+The final aim of the correction package is to fully correct scan distortion in STEM images. So far, a global affine correction for constant drift has been implemented:
+![Alt text](images/Corrected.png?raw=true "Corrected Images")
