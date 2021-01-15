@@ -307,17 +307,23 @@ def warp_and_shift_images(images, scan_angles, drift_speed=0, drift_angle=0):
     translated_images = cp.array(translated_images)
     return translated_images
 
+def add_shifts_and_rotation_to_transform(transform, image_shape, scan_rotation_deg):
+    shift1, shift2 = (np.array(image_shape) - 1) / 2
+    T = (
+        Affine2D().translate(-shift1, -shift2)
+        + Affine2D(transform)
+        .rotate_deg(scan_rotation_deg)
+        .translate(shift1, shift2)
+    )
+    return T
+
 def warp_image(img, scanrotation, drift_speed, drift_angle, nan=False):
-    shift1, shift2 = (cp.array(img.shape) - 1) / 2
-    main_transform = transform_drift_scan(
+    drift_transform = transform_drift_scan(
          -scanrotation, 
          drift_angle, 
          drift_speed, 
          img.shape[-2])
-    T = (
-    Affine2D().translate(-shift1, -shift2)
-    + Affine2D(main_transform).rotate_deg(scanrotation).translate(shift1, shift2)
-    )
+    T = add_shifts_and_rotation_to_transform(drift_transform, img.shape, scanrotation)
     cval = cp.nan if nan else 0 # value of pixels that were outside the image border
     return affine_transform(
         img, 
@@ -440,4 +446,3 @@ def subpixel_correlation(img1, img2, subpixel_radius=2.5, steps=11, window=True,
     rough_shift, m = hybrid_correlation(img1, img2)
     shift = subpixel_correlation_shift(img1, img2, rough_shift=rough_shift, subpixel_radius = subpixel_radius, steps=steps, window=window, window_strength=window_strength)
     return shift
-
