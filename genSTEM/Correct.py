@@ -393,13 +393,10 @@ def get_best_angle_speed_shifts(images, scan_angles, drift_angles, drift_speeds,
 
     x, y = np.deg2rad(best_drift_angle), drift_speeds[0].item() * images.shape[1]
     dx, dy = 0, best_drift_speed* images.shape[1] - y
+    ax1.set(title='Testing angles', xlabel='Angles (°)', ylabel='Fit (Average over drift speeds)')
+    ax2.set(title='Testing drift speeds', xlabel='Drift Speed (A.U.)', ylabel='Fit (Average over drift angles)')
+    ax3.set(title='Radial fit representation', ylim = (s.min(), s.max()), yticklabels=[])
     ax3.annotate("", xy=(x+dx, y+dy), xytext=(x, y), arrowprops=dict(color="k"))
-    ax3.set_yticklabels([])
-    ax3.set_ylim(s.min(), s.max())
-    ax1.set_xlabel('Angles (°)')
-    ax2.set_xlabel('Drift Speed (A.U.)')
-    ax1.set_ylabel('Fit (Average over drift speeds)')
-    ax2.set_ylabel('Fit (Average over drift angles)')
     fig.tight_layout()
     fig.canvas.draw()
     return best_drift_angle, best_drift_speed, maxes[i]
@@ -452,7 +449,7 @@ def subpixel_correlation(img1, img2, subpixel_radius=2.5, steps=11, window=True,
     shift = subpixel_correlation_shift(img1, img2, rough_shift=rough_shift, subpixel_radius = subpixel_radius, steps=steps, window=window, window_strength=window_strength)
     return shift
 
-def interpolate_image_to_new_position(img: "(Y, X)", points: "(N, 2) or (Y, X, 2)", nan=True):
+def interpolate_image_to_new_position(img: "(Y, X)", points: "(N, 2) or (Y, X, 2)", fill_value=np.nan):
     """Warp an image to new positions given by a list of coordinates that has the same length 
     as the image has pixels
     
@@ -460,12 +457,16 @@ def interpolate_image_to_new_position(img: "(Y, X)", points: "(N, 2) or (Y, X, 2
     ----------
     img: Image of shape (Y, X)
     points: Array of points of shape (N, 2), where the last two indices are in traditional (X,Y) convention
+    fill_value: Value of points interpolated outside the grid of the image.
+        False or float or np.nan
+        False follows interpolate.py behaviour.
     """
     # Grid probably becomes a linspace'd array:
     grid = ((0, img.shape[0]-1, img.shape[0]), (0, img.shape[1]-1, img.shape[1]))
+    points = points.reshape((-1, 2))
     points = points[:,::-1] # Swap coordinates to (Y, X) convention
-    new_img = eval_linear(grid, values, points)
-    if nan:
-        mask = np.any((points >= image_shape) | (points < 0.), axis=1)
-        new_img[mask] = np.nan
-    return new_img.reshape(image_shape)
+    interpolated_values = eval_linear(grid, img, points)
+    if fill_value is not False and fill_value is not None:
+        mask = np.any((points >= img.shape) | (points < 0.), axis=1)
+        interpolated_values[mask] = fill_value
+    return interpolated_values.reshape(img.shape)

@@ -5,8 +5,7 @@ import matplotlib.cm
 from tqdm.auto import tqdm
 from matplotlib.transforms import Affine2D
 from matplotlib.patches import Arrow
-import scipy.ndimage as ndimage
-import scipy.ndimage.filters as filters
+
 
 from .utils import cp, asnumpy
 
@@ -186,11 +185,15 @@ def transform_points(points: "(N, 2)", transform: "(3,3)"):
     and then removes the third coordinate again.
     Supports cp as well!
     '''
+    shape = points.shape
+    points = points.reshape((-1, 2))
     points = extend_3D_ones(points).T
     prime = transform @ points
-    return prime[:2].T
+    return prime[:2].T.reshape(shape)
 
 def get_and_plot_peaks(data, average_distance_between_peaks=80, threshold = 1):
+    import scipy.ndimage as ndimage
+    import scipy.ndimage.filters as filters
     neighborhood_size = average_distance_between_peaks
     
     data_max = filters.maximum_filter(data, neighborhood_size)
