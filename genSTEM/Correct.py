@@ -10,7 +10,7 @@ from time import time
 try:
     from interpolation.splines import eval_linear
 except:
-    print("Missing the package 'interpolation.py' - currently do `conda install interpolation numba=0.49` due to some dev issues on their part")
+    print("Scanline development only: Missing the package 'interpolation.py' - currently do `conda install interpolation numba=0.49` due to some dev issues on their part")
 
 
 def create_final_stack_and_average(images, scan_angles, best_str, best_angle, normalize_correlation = False, print_shifts = False, subpixel=False):

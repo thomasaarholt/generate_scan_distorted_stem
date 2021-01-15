@@ -15,6 +15,8 @@ To get started, we recommend trying the [Affine Correction Example Notebook](exa
 - Numpy
 - Matplotlib 
 - scipy
+- ase
+- sympy
 - tqdm
 - cupy (optional, speeds things up, but needs CUDA 11.1 (not newer - yet)
 - ipympl (to show inline interactive figures in the notebook)
@@ -23,7 +25,7 @@ The easiest way to have everything is to create an anaconda environment with the
 install genSTEM directly from the github. For the best, "widescreen" viewing experience, we recommend jupyter lab.
 
 ```bash
-conda create --name stem numpy matplotlib scipy tqdm notebook ipympl # jupyterlab
+conda create --name stem numpy matplotlib scipy ase sympy tqdm notebook ipympl # jupyterlab
 conda activate stem
 pip install https://github.com/thomasaarholt/generate_scan_distorted_stem/archive/main.zip
 ```
