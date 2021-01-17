@@ -26,8 +26,9 @@ def get_atoms():
     atoms.numbers[346] = 80
     return atoms
 
-def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, minScanAngle=0, maxScanAngle=360, drift_speed=5, drift_angle=None, jitter_strength=0., **kwargs):
+def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, minScanAngle=0, maxScanAngle=360, drift_speed=5, drift_angle=None, jitter_strength=0., centre_drift=True, random_offset=False, square=True, **kwargs):
     '''Quickly generate images of a atoms object taken at various scan angles.
+    TODO: Add option for random translation on each image, so that we don't accidentally have a perfectly centered image stack
     
     Parameters
     ----------
@@ -51,6 +52,8 @@ def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, m
         Angle of drift in degrees.  This provides the angle of the unit vector provided to ImageModel.
     jitter_strength: float
         Shifts each scanline by a random factor.
+    centre_drift: float
+        Centres the drift so the image doesn't drift out of frame
     **kwargs
         Additional parameters accepted by ImageModel.
     
@@ -67,29 +70,34 @@ def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, m
     else:
         random_angle = drift_angle
     drift_vector = [np.cos(random_angle),np.sin(random_angle)]
-    centre_drift = True
     
     images = []
 
     scanangles = np.linspace(minScanAngle, maxScanAngle, nImages, endpoint=False)
+    models = []
     for scanangle in tqdm(scanangles):
-        m = ImageModel(atoms, scan_rotation=scanangle,
+        model = ImageModel(atoms, scan_rotation=scanangle,
                     pixel_size=pixel_size, vacuum=vacuum,
                         drift_speed=drift_speed, 
                         drift_vector=drift_vector,
                         jitter_strength=jitter_strength, 
                         centre_drift=centre_drift,
-                        fast=False, **kwargs
+                        fast=False, random_offset=random_offset, 
+                        **kwargs
                     )
-        img = m.generate()
-        side = np.minimum(*img.shape)
-        images.append(img[:side, :side])
+        models.append(model)
+        img = model.generate()
+        if square:
+            side = np.minimum(*img.shape)
+            images.append(img[:side, :side])
+        else:
+            images.append(img)
     images = cp.stack(images)
     print(f"Size: {images.nbytes / 1e9} GB")
     print(f"Shape: {images.shape}")
-    return images, scanangles, random_angle
+    return images, scanangles, random_angle, models
     
-def drift_points_readable(shape=(10,10), drift_speed=0, drift_angle = 0):
+def drift_points_readable(shape=(10,10), drift_speed=0, drift_angle=0):
     '''Calculate pixel coordinates for an image with uniform drift.
     
     Parameters
@@ -178,18 +186,19 @@ def calculate_transform_matrix(points, prime):
     T, *_ = np.linalg.lstsq(points, prime, rcond=None)
     return T
 
-def transform_points(points: "(N, 2)", transform: "(3,3)"):
-    '''Transform a 2D points array (N, 2) by a 3x3 transform
+def transform_points(points: "(2, N)", transform: "(3,3)"):
+    '''Transform a 2D points array (2, N) by a 3x3 transform
 
     Turns the list of points into a (N, 3)  array, transforms
     and then removes the third coordinate again.
     Supports cp as well!
     '''
     shape = points.shape
-    points = points.reshape((-1, 2))
-    points = extend_3D_ones(points).T
+    points = points.reshape((2, -1))
+    points = extend_3D_ones(points.T).T
     prime = transform @ points
-    return prime[:2].T.reshape(shape)
+    print(prime.shape)
+    return prime[:2].reshape(shape)
 
 def get_and_plot_peaks(data, average_distance_between_peaks=80, threshold = 1):
     import scipy.ndimage as ndimage
@@ -357,6 +366,9 @@ class ImageModel:
         Vacuum padding in Å. Add whitespace around image.
     fast: bool
         Only compute one layer of unique atoms
+    random_offset: bool, float
+        Add a random offset to the initial probe position to avoid
+        the generated images automatically being centered wrt eachother
     '''
 
     def __init__(
@@ -366,8 +378,9 @@ class ImageModel:
         pixel_size=0.1, jitter_strength=0,
         jitter_horizontal=True, jitter_vertical=False,
         sigma=0.4, power=1.8, 
-        centre_drift=True, square = False, vacuum=5.0, fast=False):
-        
+        centre_drift=True, square = False, vacuum=5.0, fast=False,
+        random_offset=False):
+
         if atoms:
             self.atom_positions = atoms.positions[:,:2]
             self.atom_numbers = atoms.numbers
@@ -399,7 +412,9 @@ class ImageModel:
         self.scan_rotation = scan_rotation
         self.square = square
         self.margin = vacuum
-        
+
+        self.random_offset = random_offset
+
         self.create_probe_positions()
         self.create_parameters()
         
@@ -411,7 +426,7 @@ class ImageModel:
         A, xc, yc, sigma = parameters
         
         Gauss = SympyGaussian2D(xy[0], xy[1], A[i], xc[i], yc[i], sigma[i])
-        model = sp.Sum(Gauss, (i,0,n-1))
+        model = sp.Sum(Gauss, (i, 0, n-1))
         self.model = model
 
     def create_probe_positions(self):
@@ -419,6 +434,15 @@ class ImageModel:
         xlow, ylow = self.atom_positions.min(0) - self.margin
         xhigh, yhigh = self.atom_positions.max(0) + self.margin
         scale = (xhigh - xlow)/100
+        if self.random_offset:
+            if self.random_offset is True:
+                self.random_offset = 5
+            dX = (2*np.random.random()-1) * self.random_offset
+            dY = (2*np.random.random()-1) * self.random_offset
+            xlow += dX
+            xhigh += dX
+            ylow += dY
+            yhigh += dY
 
         if self.square:
             xlow = ylow = min(xlow, ylow)
@@ -427,14 +451,15 @@ class ImageModel:
         yrange = cp.arange(ylow, yhigh+scale, self.pixel_size)
         self.probe_positions = cp.stack(cp.meshgrid(xrange, yrange))
         XYshape = self.probe_positions.shape
-        
+
         if self.jitter_strength:
-            self.probe_positions += add_line_jitter(
+            self.jitter = add_line_jitter(
                 XYshape = XYshape, 
                 strength=self.jitter_strength, 
                 horizontal=self.jitter_horizontal, 
                 vertical=self.jitter_vertical)
-            
+            self.probe_positions += self.jitter
+
         if self.scan_rotation:
             mean = self.probe_positions.mean(axis=(-1,-2))[:, None]
             self.probe_positions = (    
@@ -452,26 +477,26 @@ class ImageModel:
                 offsetx = driftx.max() if driftx.max() > -driftx.min() else driftx.min()
                 offsety = drifty.max() if drifty.max() > -drifty.min() else drifty.min()
                 self.probe_positions -= cp.array([offsetx, offsety])[:, None, None] / 2
-        
+
     def create_parameters(self):
         'Create the parameters that will describe the 2D-Gaussian distribution asigned to atoms.'
         xc, yc = self.atom_positions.T
         A = self.atom_numbers ** self.power
         sigma = np.ones(self.number_of_atoms) * self.sigma
         self.parameters = cp.asarray(np.array([A, xc, yc, sigma]))
-        
+
     def generate_lambdify(self):
         self.init_sympy()
         func = sp.lambdify(self.symbols, self.model, modules = 'numpy')
         self.func = func
         return func(*self.probe_positions, *self.parameters, self.number_of_atoms)
-    
+
     def generate_lambdify_cupy(self):
         self.init_sympy()
         func = sp.lambdify(self.symbols, self.model, modules = 'cupy')
         self.func_cupy = func
         return func(*self.probe_positions, *self.parameters, self.number_of_atoms)
-    
+
     def generate(self):
         X, Y = self.probe_positions
         img = cp.zeros(X.shape)

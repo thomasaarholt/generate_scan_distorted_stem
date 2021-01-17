@@ -8,7 +8,7 @@ from tqdm.auto import tqdm
 from time import time
 
 try:
-    from interpolation.splines import eval_linear
+    from interpolation.splines import eval_linear, eval_cubic, eval_cubic_numba
 except:
     print("Scanline development only: Missing the package 'interpolation.py' - currently do `conda install interpolation numba=0.49` due to some dev issues on their part")
 
@@ -50,7 +50,7 @@ def create_final_stack_and_average(images, scan_angles, best_str, best_angle, no
     warped_images_nonan[cp.isnan(warped_images_nonan)] = 0
 
     warped_imgA = warped_images_nonan[0]
-    shifts = []
+    shifts = [(0,0)] # shift of the first image, which the rest are relative to
     for warped_imgB in warped_images_nonan[1:]:
         shift, m = hybrid_correlation(warped_imgA, warped_imgB, normalize=normalize_correlation)
         shifts.append(shift)
@@ -58,12 +58,12 @@ def create_final_stack_and_average(images, scan_angles, best_str, best_angle, no
 
 
     corrected_images = warped_images_with_nan.copy()
-    corrected_images[1:] =  cp.stack([translate(img, shift[::-1], cval=cp.nan) for img, shift in zip(warped_images_with_nan[1:], shifts)])
+    corrected_images[1:] =  cp.stack([translate(img, shift[::-1], cval=cp.nan) for img, shift in zip(warped_images_with_nan[1:], shifts[1:])])
     
     if subpixel:
         subpixel_images = []
         img1 = warped_images_nonan[0].copy()
-        for img_nonan, img_nan, rough_shift in zip(warped_images_nonan[1:], warped_images_with_nan[1:], shifts):
+        for img_nonan, img_nan, rough_shift in zip(warped_images_nonan[1:], warped_images_with_nan[1:], shifts[1:]):
             shift = cp.asarray(subpixel_correlation(img1, img_nonan))
             img2b = translate(img_nan, shift + rough_shift[::-1], cval=cp.nan)
             subpixel_images.append(img2b)
@@ -71,7 +71,7 @@ def create_final_stack_and_average(images, scan_angles, best_str, best_angle, no
         corrected_images = warped_images_with_nan
     mean_image = cp.nanmean(corrected_images, axis=0)
 
-    return asnumpy(mean_image)
+    return asnumpy(mean_image), shifts
     
 def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlation=True, debug=False, correlation_power=0.8):
     """Estimates the global, constant drift on an image using affine transformations.
@@ -303,6 +303,10 @@ def transform_drift_scan(scan_angle=0, drift_angle=0, drift_speed=0, xlen=100):
     arr[..., 1,2] = -s_sin
     return arr.squeeze()
 
+def warp_images(images, scan_angles, drift_speed=0, drift_angle=0):
+    warped_images = [warp_image(img, scan, drift_speed, drift_angle) for img, scan in zip(images, scan_angles)]
+    return warped_images
+
 def warp_and_shift_images(images, scan_angles, drift_speed=0, drift_angle=0):
     warped_images = [warp_image(img, scan, drift_speed, drift_angle) for img, scan in zip(images, scan_angles)]
     translated_images = [warped_images[0]]
@@ -312,23 +316,26 @@ def warp_and_shift_images(images, scan_angles, drift_speed=0, drift_angle=0):
     translated_images = cp.array(translated_images)
     return translated_images
 
-def add_shifts_and_rotation_to_transform(transform, image_shape, scan_rotation_deg):
+def add_shifts_and_rotation_to_transform(transform, image_shape, scan_rotation_deg, post_shifts=[0,0]):
     shift1, shift2 = (np.array(image_shape) - 1) / 2
+    post_shift1, post_shift2 = post_shifts[::-1]
+
     T = (
         Affine2D().translate(-shift1, -shift2)
         + Affine2D(transform)
         .rotate_deg(scan_rotation_deg)
         .translate(shift1, shift2)
+        .translate(post_shift1, post_shift2)
     )
     return T
 
-def warp_image(img, scanrotation, drift_speed, drift_angle, nan=False):
+def warp_image(img, scanrotation, drift_speed, drift_angle, nan=False, post_shifts=[0,0]):
     drift_transform = transform_drift_scan(
          -scanrotation, 
          drift_angle, 
          drift_speed, 
          img.shape[-2])
-    T = add_shifts_and_rotation_to_transform(drift_transform, img.shape, scanrotation)
+    T = add_shifts_and_rotation_to_transform(drift_transform, img.shape, scanrotation, post_shifts)
     cval = cp.nan if nan else 0 # value of pixels that were outside the image border
     return affine_transform(
         img, 
@@ -449,7 +456,7 @@ def subpixel_correlation(img1, img2, subpixel_radius=2.5, steps=11, window=True,
     shift = subpixel_correlation_shift(img1, img2, rough_shift=rough_shift, subpixel_radius = subpixel_radius, steps=steps, window=window, window_strength=window_strength)
     return shift
 
-def interpolate_image_to_new_position(img: "(Y, X)", points: "(N, 2) or (Y, X, 2)", fill_value=np.nan):
+def interpolate_image_to_new_position(img: "(Y, X)", points: "(N, 2) or (Y, X, 2)", fill_value=np.nan, mode='linear'):
     """Warp an image to new positions given by a list of coordinates that has the same length 
     as the image has pixels
     
@@ -463,9 +470,19 @@ def interpolate_image_to_new_position(img: "(Y, X)", points: "(N, 2) or (Y, X, 2
     """
     # Grid probably becomes a linspace'd array:
     grid = ((0, img.shape[0]-1, img.shape[0]), (0, img.shape[1]-1, img.shape[1]))
-    points = points.reshape((-1, 2))
-    points = points[:,::-1] # Swap coordinates to (Y, X) convention
-    interpolated_values = eval_linear(grid, img, points)
+    points = points[::-1] # Swap coordinates to (Y, X) convention
+    points = points.reshape((2, -1)).T
+    if not points.flags.c_contiguous:
+        points = np.ascontiguousarray(points)
+    if mode == 'linear':
+        interpolated_values = eval_linear(grid, img, points)
+
+    elif mode == 'cubic':
+        from interpolation.splines import filter_cubic
+        coeff = filter_cubic(grid, img) # a 12x12 array
+        interpolated_values = eval_cubic(grid, coeff, points)
+    else:
+        raise ValueError('That mode is wrong.')
     if fill_value is not False and fill_value is not None:
         mask = np.any((points >= img.shape) | (points < 0.), axis=1)
         interpolated_values[mask] = fill_value
