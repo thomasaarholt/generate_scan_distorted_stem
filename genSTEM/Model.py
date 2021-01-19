@@ -197,7 +197,6 @@ def transform_points(points: "(2, N)", transform: "(3,3)"):
     points = points.reshape((2, -1))
     points = extend_3D_ones(points.T).T
     prime = transform @ points
-    print(prime.shape)
     return prime[:2].reshape(shape)
 
 def get_and_plot_peaks(data, average_distance_between_peaks=80, threshold = 1):
@@ -316,7 +315,7 @@ def add_line_jitter(XYshape, strength = 0.3, horizontal=True, vertical=False, ):
         
     Returns
     -------
-    ndarray of pixel shift after jitter.
+    ndarray of Å shift after jitter.
     '''
     jitter = cp.zeros(XYshape) # Shape is (2, X, Y)
     if type(strength) == tuple:
@@ -457,8 +456,8 @@ class ImageModel:
                 XYshape = XYshape, 
                 strength=self.jitter_strength, 
                 horizontal=self.jitter_horizontal, 
-                vertical=self.jitter_vertical)
-            self.probe_positions += self.jitter
+                vertical=self.jitter_vertical) * self.pixel_size
+            self.probe_positions += self.jitter 
 
         if self.scan_rotation:
             mean = self.probe_positions.mean(axis=(-1,-2))[:, None]

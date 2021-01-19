@@ -487,3 +487,86 @@ def interpolate_image_to_new_position(img: "(Y, X)", points: "(N, 2) or (Y, X, 2
         mask = np.any((points >= img.shape) | (points < 0.), axis=1)
         interpolated_values[mask] = fill_value
     return interpolated_values.reshape(img.shape)
+
+
+def bilinear_bincount_numpy(points, intensities):
+    """Bilinear weighting of points onto a grid.
+    Extent of grid given by min and max of points in each dimension
+    points should have shape (N, 2)
+    intensity should have shape (N,)
+    """
+    floor = np.floor(points)
+    ceil = floor + 1
+    floored_indices = np.array(floor, dtype=int)
+    low0, low1 = floored_indices.min(0)
+    high0, high1 = floored_indices.max(0)
+    floored_indices = floored_indices - (low0, low1)
+    shape = (high0 - low0 + 2, high1-low1 + 2)
+
+    upper_diff = ceil - points
+    lower_diff = points - floor
+
+    w1 = np.prod((upper_diff), axis=1)
+    w2 = upper_diff[:,0]*lower_diff[:,1]
+    w3 = lower_diff[:,0]*upper_diff[:,1]
+    w4 = np.prod((lower_diff), axis=1)
+
+    shifts = np.array([[0, 0], [0, 1], [1, 0], [1, 1]])
+    indices = floored_indices[:, None] + shifts
+    indices = (indices * (shape[0], 1)).sum(-1)
+    weights = np.array([w1, w2, w3, w4]).T
+
+    weight_bins = np.bincount(indices.flatten(), weights=weights.flatten())
+    intens_bins = np.bincount(indices.flatten(), weights=(intensities[:, None]*weights).flatten())
+
+    all_weight_bins = np.zeros(np.prod(shape))
+    all_intens_bins = np.zeros(np.prod(shape))
+
+    all_weight_bins[:len(weight_bins)] = weight_bins
+    all_intens_bins[:len(weight_bins)] = intens_bins
+
+    weight_image = all_weight_bins.reshape(shape)
+    intens_image = all_intens_bins.reshape(shape)
+    return intens_image, weight_image
+
+def bilinear_bincount_cupy(points, intensities):
+    """Bilinear weighting of points onto a grid.
+    Extent of grid given by min and max of points in each dimension
+    points should be a cupy array of shape (N, 2)
+    intensity should be a cupy array of shape (N,)
+    """
+    floor = cp.floor(points)
+    ceil = floor + 1
+    floored_indices = cp.array(floor, dtype=int)
+    low0, low1 = floored_indices.min(0)
+    high0, high1 = floored_indices.max(0)
+    floored_indices = floored_indices - cp.array([low0, low1])
+    shape = cp.array([high0 - low0 + 2, high1-low1 + 2])
+
+    upper_diff = ceil - points
+    lower_diff = points - floor
+
+    w1 = upper_diff[:, 0] * upper_diff[:, 1]
+    w2 = upper_diff[:, 0] * lower_diff[:, 1]
+    w3 = lower_diff[:, 0] * upper_diff[:, 1]
+    w4 = lower_diff[:, 0] * lower_diff[:, 1]
+
+    shifts = cp.array([[0, 0], [0, 1], [1, 0], [1, 1]])
+    indices = floored_indices[:, None] + shifts
+    indices = (indices * cp.array([shape[0].item(), 1])).sum(-1)
+    weights = cp.array([w1, w2, w3, w4]).T
+
+    # These bins only fill up to the highest index - not to shape[0]*shape[1]
+    weight_bins = cp.bincount(indices.flatten(), weights=weights.flatten())
+    intens_bins = cp.bincount(indices.flatten(), weights=(intensities[:, None]*weights).flatten())
+    
+    # So we create a zeros array that is big enough
+    all_weight_bins = cp.zeros(cp.prod(shape).item())
+    all_intens_bins = cp.zeros_like(all_weight_bins)
+    # And fill it here
+    all_weight_bins[:len(weight_bins)] = weight_bins
+    all_intens_bins[:len(weight_bins)] = intens_bins
+
+    weight_image = all_weight_bins.reshape(shape.get())
+    intens_image = all_intens_bins.reshape(shape.get())
+    return intens_image, weight_image
