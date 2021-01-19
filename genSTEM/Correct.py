@@ -76,7 +76,7 @@ def create_final_stack_and_average(images, scan_angles, best_str, best_angle, no
 
     return asnumpy(mean_image), shifts
     
-def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlation=True, debug=False, correlation_power=0.8):
+def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlation=True, debug=False, correlation_power=0.8, low_drift=False):
     """Estimates the global, constant drift on an image using affine transformations.
     Takes as input a list of images and scan angles. Only tested with square images.
 
@@ -92,7 +92,10 @@ def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlati
 
     xlen = images.shape[1]
     str_steps = 8
-    str_low, str_high = 0, 1 / xlen
+    if low_drift:
+        str_low, str_high = 0, (1 / xlen) / 1000
+    else:
+        str_low, str_high = 0, 1 / xlen
 
     print("Getting fit with no drift first")
     all_maxes, pairs = warp_and_correlate(
@@ -577,8 +580,7 @@ def bilinear_bincount_cupy(points, intensities):
 def get_indices_of_non_parallel_images(scanangles):
     "For each scan rotation, get the indices of the other scanangles that are not parallel to it"
     images_non_parallel_indices = []
-    for i in range(4):
-        current_angle = scanangles[i]
+    for current_angle in scanangles:
         non_parallel_indices = []
         for index, angle in enumerate(scanangles):
             if angle != current_angle and angle != (current_angle + 180) % 360:
