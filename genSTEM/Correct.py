@@ -627,7 +627,9 @@ def get_row_shifts(images, interpolation_functions, transforms, image_indices=No
                 reference_image_row = interpolation_functions[i](row_indices[:,::-1])
                 diff = abs_difference(original_image_row, reference_image_row)
                 diffs.append(diff)
-
+            if np.isnan(diffs).all():
+                row_shifts.append(0.)
+                continue
             min_index = np.nanargmin(diffs)
             shift = deltarange[min_index]
             row_shifts.append(shift)
