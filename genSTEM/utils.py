@@ -6,7 +6,11 @@ from numba import jit
 try:
     #raise ValueError() # Uncomment this to test numpy-version on cupy-enabled systems
     import cupy as cp
-    asnumpy = cp.asnumpy
+    def asnumpy(arr):
+        try:
+            return cp.asnumpy(arr)
+        except:
+            return arr
     from cupyx.scipy.ndimage import affine_transform, zoom
 
 except:
