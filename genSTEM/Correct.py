@@ -4,8 +4,11 @@ from matplotlib.transforms import Affine2D
 from .utils import (
     cp, asnumpy, affine_transform, make_zero_zero, swap_transform_standard, tukey_window,
     normalize_one, normalize_many, estimate_center, Gaussian2DFunc)
+from .Model import transform_points
 from tqdm.auto import tqdm
 from time import time
+from scipy.interpolate import NearestNDInterpolator, LinearNDInterpolator, CloughTocher2DInterpolator
+from scipy.spatial import Delaunay
 
 try:
     from interpolation.splines import eval_linear, eval_cubic, eval_cubic_numba
@@ -570,3 +573,40 @@ def bilinear_bincount_cupy(points, intensities):
     weight_image = all_weight_bins.reshape(shape.get())
     intens_image = all_intens_bins.reshape(shape.get())
     return intens_image, weight_image
+
+def get_indices_of_non_parallel_images(scanangles):
+    "For each scan rotation, get the indices of the other scanangles that are not parallel to it"
+    images_non_parallel_indices = []
+    for i in range(4):
+        current_angle = scanangles[i]
+        non_parallel_indices = []
+        for index, angle in enumerate(scanangles):
+            if angle != current_angle and angle != (current_angle + 180) % 360:
+                non_parallel_indices.append(index)
+        images_non_parallel_indices.append(non_parallel_indices)
+    images_non_parallel_indices = np.array(images_non_parallel_indices)
+    return images_non_parallel_indices
+
+def abs_difference(original, reference):
+    """
+    Get absolute difference between two images/rows that may contain nans
+    should not be used on individual pixels, since one pixel may be nan
+    and the other not
+    """
+    # Consider dividing by total counts before comparing?
+    original_sum = np.nansum(original)
+    reference_sum = np.nansum(reference)
+    #/reference_sum * original_sum
+    return np.nanmean(np.abs(original - reference))
+
+def make_final_image(images, transforms, corrected_indices):
+    "Should add option to specify which positions one wants to interpolate"
+    coords = []
+    for i in range(len(images)):
+        coords.append(transform_points(corrected_indices[i][::-1], transforms[i]))
+    coords = np.array(coords)
+    tesselation = Delaunay(np.swapaxes(coords, 0, 1).reshape((2,-1)).T)
+    func = LinearNDInterpolator(tesselation, asnumpy(images.flatten()), fill_value=np.nan)
+    indices = np.indices(images.shape[1:])
+    final_img = func(indices[::-1].reshape((2, -1)).T).reshape(images.shape[1:])
+    return final_img
