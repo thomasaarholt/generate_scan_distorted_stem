@@ -597,7 +597,7 @@ def abs_difference(original, reference):
     """
     return np.nanmean(np.abs(original - reference))
 
-def make_final_image(images, transforms, corrected_indices):
+def make_final_image(images, transforms, corrected_indices, subpixel_factor=1):
     "Should add option to specify which positions one wants to interpolate"
     coords = []
     for i in range(len(images)):
@@ -605,8 +605,11 @@ def make_final_image(images, transforms, corrected_indices):
     coords = np.array(coords)
     tesselation = Delaunay(np.swapaxes(coords, 0, 1).reshape((2,-1)).T)
     func = LinearNDInterpolator(tesselation, asnumpy(images.flatten()), fill_value=np.nan)
-    indices = np.indices(images.shape[1:])
-    final_img = func(indices[::-1].reshape((2, -1)).T).reshape(images.shape[1:])
+    indices = np.mgrid[
+        :images.shape[1]-1/subpixel_factor:subpixel_factor*images.shape[1]*1j, 
+        :images.shape[2]-1/subpixel_factor:subpixel_factor*images.shape[2]*1j
+    ]
+    final_img = func(indices[::-1].reshape((2, -1)).T).reshape(indices.shape[1:])
     return final_img
 
 
