@@ -601,7 +601,7 @@ def make_final_image(images, transforms, corrected_indices, subpixel_factor=1):
     "Should add option to specify which positions one wants to interpolate"
     coords = []
     for i in range(len(images)):
-        coords.append(transform_points(corrected_indices[i][::-1], transforms[i]))
+        coords.append(transform_points(corrected_indices[i], swap_transform_standard(transforms[i])))
     coords = np.array(coords)
     tesselation = Delaunay(np.swapaxes(coords, 0, 1).reshape((2,-1)).T)
     func = LinearNDInterpolator(tesselation, asnumpy(images.flatten()), fill_value=np.nan)
@@ -609,7 +609,7 @@ def make_final_image(images, transforms, corrected_indices, subpixel_factor=1):
         :images.shape[1]-1/subpixel_factor:subpixel_factor*images.shape[1]*1j, 
         :images.shape[2]-1/subpixel_factor:subpixel_factor*images.shape[2]*1j
     ]
-    final_img = func(indices[::-1].reshape((2, -1)).T).reshape(indices.shape[1:])
+    final_img = func(indices.reshape((2, -1)).T).reshape(indices.shape[1:])
     return final_img
 
 
@@ -622,12 +622,14 @@ def get_row_shifts(images, interpolation_functions, transforms, image_indices=No
     image_row_shifts = []
     for i in tqdm(range(len(images)), desc="Calculating row shift"):
         row_shifts = []
+
+
         for row_index in np.arange(images.shape[-2]):
             original_image_row = asnumpy(images[i, row_index])
             diffs = []
             for deltaRow in deltarange:
-                row_indices = transform_points(image_indices[i, :, row_index][::-1] + np.array([deltaRow, 0])[:, None], transforms[i]).T
-                reference_image_row = interpolation_functions[i](row_indices[:,::-1])
+                row_indices = transform_points(image_indices[i, :, row_index] + np.array([0, deltaRow])[:, None], swap_transform_standard(transforms[i])).T
+                reference_image_row = interpolation_functions[i](row_indices)
                 diff = abs_difference(original_image_row, reference_image_row)
                 diffs.append(diff)
             if np.isnan(diffs).all():
@@ -650,7 +652,6 @@ def get_interpolated_functions_and_transforms(images, scanangles, best_angle, be
     forward_transformed_coords = []
     intensities = []
     funcs = []
-    images_cpu = asnumpy(images)
     transforms = []
 
     for i, image in enumerate(tqdm(images, desc='Creating transforms')):
@@ -658,7 +659,7 @@ def get_interpolated_functions_and_transforms(images, scanangles, best_angle, be
         T = add_shifts_and_rotation_to_transform(
             T, image.shape, scan_rotation_deg=scanangles[i], post_shifts=post_shifts[i]).get_matrix()
 
-        forward_coords = transform_points(image_indices[i][::-1], T)
+        forward_coords = transform_points(image_indices[i], T)
         transforms.append(T)
 
         forward_transformed_coords.append(forward_coords)
@@ -673,7 +674,7 @@ def get_interpolated_functions_and_transforms(images, scanangles, best_angle, be
         for index, j in enumerate(other_indices[i]):
             coords[index] = forward_transformed_coords[j]
             intens[index] = intensities[j]
-        tesselation = Delaunay(np.swapaxes(coords, 0, 1).reshape((2,-1))[::-1].T)
+        tesselation = Delaunay(np.swapaxes(coords, 0, 1).reshape((2,-1)).T)
         func = LinearNDInterpolator(tesselation, intens.flatten(), fill_value=np.nan)
         funcs.append(func)
     return funcs, transforms
