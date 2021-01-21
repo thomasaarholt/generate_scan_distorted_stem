@@ -93,7 +93,7 @@ def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlati
     xlen = images.shape[1]
     str_steps = 8
     if low_drift:
-        str_low, str_high = 0, (1 / xlen) / 1000
+        str_low, str_high = 0, (1 / xlen) / 100000
     else:
         str_low, str_high = 0, 1 / xlen
 
@@ -119,8 +119,8 @@ def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlati
     try:
         while i < 2 or not converged_for_two_iterations:
             print()
-            print("Iteration #{}: Best guess: Angle: {}°, Speed: {:.2e}. Fit value: {:.2e}".format(
-                i+j, np.round(best_angle, 2), np.round(best_str, 5), fit_value)
+            print("Iteration #{}: Best guess: Angle: {:.2f}°, Speed: {:.2e}. Fit value: {:.2e}".format(
+                i+j, best_angle, best_str, fit_value)
                 + "\nLimits: [{:.1f}°, {:.1f}°], [{:.2e}, {:.2e}]".format(
                     angle_low % 360, angle_high % 360, str_low, str_high))
             old_values = new_values
@@ -332,6 +332,20 @@ def add_shifts_and_rotation_to_transform(transform, image_shape, scan_rotation_d
         .rotate_deg(scan_rotation_deg)
         .translate(shift1, shift2)
         .translate(post_shift1, post_shift2)
+    )
+    return T
+
+
+def add_shifts_only_to_transform(transform, image_shape, scan_rotation_deg, ):#post_shifts=[0,0]):
+    shift1, shift2 = (np.array(image_shape) - 1) / 2
+    #post_shift1, post_shift2 = post_shifts[::-1]
+
+    T = (
+        Affine2D().translate(-shift1, -shift2)
+        + Affine2D(transform)
+        #.rotate_deg(scan_rotation_deg)
+        .translate(shift1, shift2)
+        #.translate(post_shift1, post_shift2)
     )
     return T
 
@@ -547,6 +561,7 @@ def bilinear_bincount_cupy(points, intensities):
     low0, low1 = floored_indices.min(0)
     high0, high1 = floored_indices.max(0)
     floored_indices = floored_indices - cp.array([low0, low1])
+    print(low0, high0, low1, high1)
     shape = cp.array([high0 - low0 + 2, high1-low1 + 2])
 
     upper_diff = ceil - points
@@ -570,6 +585,7 @@ def bilinear_bincount_cupy(points, intensities):
     all_weight_bins = cp.zeros(cp.prod(shape).item())
     all_intens_bins = cp.zeros_like(all_weight_bins)
     # And fill it here
+    print(all_weight_bins.shape, weight_bins.shape)
     all_weight_bins[:len(weight_bins)] = weight_bins
     all_intens_bins[:len(weight_bins)] = intens_bins
 
@@ -595,7 +611,9 @@ def abs_difference(original, reference):
     should not be used on individual pixels, since one pixel may be nan
     and the other not
     """
-    return np.nanmean(np.abs(original - reference))
+    shape = reference.shape
+    reference = reference.reshape((-1, shape[-1]))
+    return np.nanmean(np.abs(original - reference), axis=-1).reshape(shape[:-1])
 
 def make_final_image(images, transforms, corrected_indices, subpixel_factor=1):
     "Should add option to specify which positions one wants to interpolate"
@@ -622,8 +640,6 @@ def get_row_shifts(images, interpolation_functions, transforms, image_indices=No
     image_row_shifts = []
     for i in tqdm(range(len(images)), desc="Calculating row shift"):
         row_shifts = []
-
-
         for row_index in np.arange(images.shape[-2]):
             original_image_row = asnumpy(images[i, row_index])
             diffs = []
@@ -675,7 +691,47 @@ def get_row_col_shifts(images, interpolation_functions, transforms, image_indice
     image_row_shifts = np.array(image_row_shifts)
     return np.swapaxes(image_row_shifts, -1, -2)
 
+def get_row_col_shifts2(images, interpolation_functions, transforms, image_indices=None, max_pixel_shift=1, steps=11):
+    if image_indices is None:
+        indices = np.indices(images.shape[1:])
+        image_indices = np.stack(len(images)*[indices]).astype(float)
+    deltarange = np.linspace(-max_pixel_shift, max_pixel_shift, steps)
 
+    image_row_shifts = np.zeros((len(images), 2, images.shape[-2]))
+    for i, image in enumerate(tqdm(images, desc="Calculating row shift")):
+        #image = cp.asarray(image) # move to GPU if available, for faster differencing below
+        row_shifts = []
+        for row_index in np.arange(image.shape[-2]):
+            original_image_row = image[row_index]
+
+            shifted_indices = []
+            for delta_row in deltarange:
+                shifted_indices_cols = []
+                for delta_col in deltarange:
+                    shifted_indices_cols.append(image_indices[i, :, row_index] + np.array([delta_col, delta_row])[:, None])
+                shifted_indices.append(shifted_indices_cols)
+            shifted_indices = np.array(shifted_indices)
+            shifted_indices = np.swapaxes(shifted_indices, -1, -2)
+            shape = shifted_indices.shape
+
+            shifted_indices = shifted_indices.reshape((-1, 2)).T
+            row_indices = asnumpy(transform_points(shifted_indices, swap_transform_standard(transforms[i])).T) ###
+            reference_image_rows = interpolation_functions[i](row_indices).reshape(shape[:-1])
+            diff = abs_difference(original_image_row, reference_image_rows)
+            nan_mask = np.isnan(diff)
+            # If the difference between real image and reference image, without shift == nan
+            # Or if all differences are nan
+            # Then don't shift the row
+            if nan_mask[(steps - 1) // 2, (steps - 1) // 2] or np.all(nan_mask):
+                shift = [0.,0.]
+            else:
+                min_index = np.nanargmin(diff)
+                irow, icol = np.unravel_index(min_index.item(), diff.shape)
+                shift = [deltarange[icol], deltarange[irow]]
+            image_row_shifts[i, 0, row_index] = deltarange[icol]
+            image_row_shifts[i, 1, row_index] = deltarange[irow]
+
+    return asnumpy(image_row_shifts)
 
 
 def get_interpolated_functions_and_transforms(images, scanangles, best_angle, best_speed, post_shifts, image_indices=None):
@@ -683,22 +739,24 @@ def get_interpolated_functions_and_transforms(images, scanangles, best_angle, be
     indices = np.indices(images.shape[1:])
     if image_indices is None:
         image_indices = np.stack(len(images)*[indices]).astype(float)
-
+    image_indices = np.asarray(image_indices)
     forward_transformed_coords = []
     intensities = []
     funcs = []
     transforms = []
 
-    for i, image in enumerate(tqdm(images, desc='Creating transforms')):
+    for i, image in enumerate(images):
         T = transform_drift_scan(-scanangles[i], best_angle, best_speed, images.shape[-2])
         T = add_shifts_and_rotation_to_transform(
             T, image.shape, scan_rotation_deg=scanangles[i], post_shifts=post_shifts[i]).get_matrix()
 
-        forward_coords = transform_points(image_indices[i], T)
+        forward_coords = transform_points(image_indices[i], swap_transform_standard(T))
         transforms.append(T)
-
-        forward_transformed_coords.append(forward_coords)
+ 
+        # input to interpolation must be numpy not cupy
+        forward_transformed_coords.append(asnumpy(forward_coords))
         intensities.append(asnumpy(image))
+    transforms = np.array(transforms)
 
     forward_transformed_coords = np.array(forward_transformed_coords)
     intensities = np.array(intensities)
