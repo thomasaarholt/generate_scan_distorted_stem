@@ -643,6 +643,41 @@ def get_row_shifts(images, interpolation_functions, transforms, image_indices=No
     return image_row_shifts
 
 
+def get_row_col_shifts(images, interpolation_functions, transforms, image_indices=None, max_pixel_shift=1, steps=11):
+    if image_indices is None:
+        indices = np.indices(images.shape[1:])
+        image_indices = np.stack(len(images)*[indices]).astype(float)
+    deltarange = np.linspace(-max_pixel_shift, max_pixel_shift, steps)
+
+    image_row_shifts = []
+    for i in tqdm(range(len(images)), desc="Calculating row shift"):
+        row_shifts = []
+        for row_index in np.arange(images.shape[-2]):
+            original_image_row = asnumpy(images[i, row_index])
+            diff_row = []
+            for delta_row in deltarange:
+                diff_col = []
+                for delta_col in deltarange:
+                    row_indices = transform_points(image_indices[i, :, row_index] + np.array([delta_col, delta_row])[:, None], swap_transform_standard(transforms[i])).T
+                    reference_image_row = interpolation_functions[i](row_indices)
+                    diff = abs_difference(original_image_row, reference_image_row)
+                    diff_col.append(diff)
+                diff_row.append(diff_col)
+            diff_row = np.array(diff_row)
+            if np.isnan(diff_row).all():
+                row_shifts.append([0., 0.])
+                continue
+            min_index = np.nanargmin(diff_row)
+            irow, icol = np.unravel_index(min_index, diff_row.shape)
+            shift = [deltarange[icol], deltarange[irow]]
+            row_shifts.append(shift)
+        image_row_shifts.append(row_shifts)
+    image_row_shifts = np.array(image_row_shifts)
+    return np.swapaxes(image_row_shifts, -1, -2)
+
+
+
+
 def get_interpolated_functions_and_transforms(images, scanangles, best_angle, best_speed, post_shifts, image_indices=None):
     other_indices = get_indices_of_non_parallel_images(scanangles)
     indices = np.indices(images.shape[1:])

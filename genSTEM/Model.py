@@ -82,6 +82,7 @@ def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, m
                         drift_vector=drift_vector,
                         jitter_strength=jitter_strength, 
                         centre_drift=centre_drift,
+                        jitter_vertical=True,
                         fast=False, random_offset=random_offset, 
                         **kwargs
                     )
