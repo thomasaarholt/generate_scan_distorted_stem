@@ -728,8 +728,55 @@ def get_row_col_shifts2(images, interpolation_functions, transforms, image_indic
                 min_index = np.nanargmin(diff)
                 irow, icol = np.unravel_index(min_index.item(), diff.shape)
                 shift = [deltarange[icol], deltarange[irow]]
-            image_row_shifts[i, 0, row_index] = deltarange[icol]
-            image_row_shifts[i, 1, row_index] = deltarange[irow]
+            image_row_shifts[i, 0, row_index] = shift[0]
+            image_row_shifts[i, 1, row_index] = shift[1]
+
+    return asnumpy(image_row_shifts)
+
+
+def get_row_col_shifts3(images, interpolation_functions, transforms, image_indices=None, max_pixel_shift=1, steps=3):
+    indices = np.indices(images.shape[1:])
+    if image_indices is None:
+        image_indices = np.stack(len(images)*[indices]).astype(float)
+    deltarange = np.linspace(-max_pixel_shift, max_pixel_shift, steps)
+
+    image_row_shifts = np.zeros((len(images), 2, images.shape[-2]))
+    for i, image in enumerate(tqdm(images, desc="Calculating row shift")):
+        #image = cp.asarray(image) # move to GPU if available, for faster differencing below
+        row_shifts = []
+        shi = np.zeros((2,) + (steps, steps) + images.shape[1:])
+        ref = np.zeros((steps, steps) + images.shape[1:])
+
+        shi = shi + image_indices[i][:, None, None].astype(float) + np.array(np.meshgrid(deltarange, deltarange))[..., None, None]        
+
+        for row_index in np.arange(image.shape[-2]):
+
+            shifted_indices = []
+            for delta_row in deltarange:
+                shifted_indices_cols = []
+                for delta_col in deltarange:
+                    shifted_indices_cols.append(image_indices[i, :, row_index] + np.array([delta_col, delta_row])[:, None])
+                shifted_indices.append(shifted_indices_cols)
+            shifted_indices = np.array(shifted_indices)
+            shifted_indices = np.swapaxes(shifted_indices, -1, -2)
+            shape = shifted_indices.shape
+
+            shifted_indices = shifted_indices.reshape((-1, 2)).T
+            row_indices = asnumpy(transform_points(shifted_indices, swap_transform_standard(transforms[i])).T) ###
+            reference_image_rows = interpolation_functions[i](row_indices).reshape(shape[:-1])
+            diff = abs_difference(original_image_row, reference_image_rows)
+            nan_mask = np.isnan(diff)
+            # If the difference between real image and reference image, without shift == nan
+            # Or if all differences are nan
+            # Then don't shift the row
+            if nan_mask[(steps - 1) // 2, (steps - 1) // 2] or np.all(nan_mask):
+                shift = [0.,0.]
+            else:
+                min_index = np.nanargmin(diff)
+                irow, icol = np.unravel_index(min_index.item(), diff.shape)
+                shift = [deltarange[icol], deltarange[irow]]
+            image_row_shifts[i, 0, row_index] = shift[0]
+            image_row_shifts[i, 1, row_index] = shift[1]
 
     return asnumpy(image_row_shifts)
 
