@@ -9,7 +9,7 @@ from matplotlib.patches import Arrow
 
 from .utils import cp, asnumpy
 
-def get_atoms():
+def get_example_atoms():
     "Simple interesting-looking structure for testing"
     from ase.spacegroup import crystal
     from ase.build import make_supercell

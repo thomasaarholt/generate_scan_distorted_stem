@@ -9,11 +9,11 @@ from tqdm.auto import tqdm
 from time import time
 from scipy.interpolate import NearestNDInterpolator, LinearNDInterpolator, CloughTocher2DInterpolator
 from scipy.spatial import Delaunay
-
+from sklearn.neighbors import KNeighborsRegressor
 try:
     from interpolation.splines import eval_linear, eval_cubic, eval_cubic_numba
 except:
-    print("Scanline development only: Missing the package 'interpolation.py' - currently do `conda install interpolation numba=0.49` due to some dev issues on their part")
+    pass
 
 
 def create_final_stack_and_average(images, scan_angles, best_str, best_angle, normalize_correlation = False, print_shifts = False, subpixel=False):
@@ -243,12 +243,6 @@ def hybrid_correlation(
 
     if normalize:
         img1, img2 = normalize_many(cp.stack([img1, img2]), window)
-        #img1 = (img1 - np.sum(img1 * window) / np.sum(window) ) * window
-        #img2 = (img2 - np.sum(img2 * window) / np.sum(window) ) * window
-        #img1 = normalize_one(img1, window)
-        #img2 = normalize_one(img2, window)
-        #img1 = (img1 - img1.mean() * window) * window
-        #img2 = (img2 - img2.mean() * window) * window
     else:
         img1 = img1 * window
         img2 = img2 * window
@@ -260,6 +254,64 @@ def hybrid_correlation(
     fftimg1 = cp.fft.rfft2(img1)
     fftimg2 = cp.fft.rfft2(img2)
     
+    m = fftimg1 * cp.conj(fftimg2)
+    corr =  cp.fft.irfft2(cp.abs(m)**p * cp.exp(1j * cp.angle(m)))
+
+    if fit_only:
+        return corr.max()
+
+    corr = cp.fft.fftshift(corr)
+    translation = cp.array(cp.unravel_index(corr.argmax(), corr.shape))
+    center = cp.array(corr.shape) // 2
+    return [x.item() for x in translation - center], corr.max()
+
+def prepare_correlate(images, window="tukey", window_strength=0.1):
+    """Prepare images for hybrid correlation by windowing, normalizing, padding
+     and taking the fft
+    """
+    if window == "tukey":
+        window = cp.asarray(tukey_window(images.shape[1:], alpha=window_strength))
+    else:
+        window = 1
+
+    images = normalize_many(images, window)
+    padsize1 = images.shape[1] // 4
+    padsize2 = images.shape[2] // 4
+    images = cp.pad(images, ((0,0), (padsize1, padsize1), (padsize2, padsize2)))
+    fftimages = cp.fft.rfft2(images)
+    return fftimages
+
+def hybrid_correlation_prefft_all(fftimages, p=0.8, fit_only=False):
+    """Fastest implementation, compares first image to rest. Could consider performing it 
+    across all permutations of images.
+    """
+    fimg0 = fftimages[0]
+    restimages = fftimages[1:]
+    m = fimg0 * cp.conj(restimages)
+    corr =  cp.fft.irfft2(cp.abs(m)**p * cp.exp(1j * cp.angle(m)))
+    score = corr.max(axis=(-2, -1))
+
+    if fit_only:
+        return score.mean()
+    else:
+        corr = cp.fft.fftshift(corr, axes=(-2,-1))
+        center = cp.array(corr.shape[1:]) // 2
+        max_coord = cp.array(cp.unravel_index(corr.argmax(axis=(-2, -1)), corr[0].shape), dtype=int).T
+        shift = max_coord - center
+        return shift, score.mean()
+
+def hybrid_correlation_prefft(
+    fftimg1, 
+    fftimg2,
+    p=0.8,
+    fit_only = False,
+    ):
+    """Performs hybrid correlation on two images.
+
+    fit_only will only return the correlation maximum value, 
+    not the required shift.
+    """
+
     m = fftimg1 * cp.conj(fftimg2)
     corr =  cp.fft.irfft2(cp.abs(m)**p * cp.exp(1j * cp.angle(m)))
 
@@ -698,7 +750,7 @@ def get_row_col_shifts2(images, interpolation_functions, transforms, image_indic
     deltarange = np.linspace(-max_pixel_shift, max_pixel_shift, steps)
 
     image_row_shifts = np.zeros((len(images), 2, images.shape[-2]))
-    for i, image in enumerate(tqdm(images, desc="Calculating row shift")):
+    for i, image in enumerate(tqdm(asnumpy(images), desc="Calculating row shift")):
         #image = cp.asarray(image) # move to GPU if available, for faster differencing below
         row_shifts = []
         for row_index in np.arange(image.shape[-2]):
@@ -743,7 +795,6 @@ def get_row_col_shifts3(images, interpolation_functions, transforms, image_indic
     image_row_shifts = np.zeros((len(images), 2, images.shape[-2]))
     for i, image in enumerate(tqdm(images, desc="Calculating row shift")):
         #image = cp.asarray(image) # move to GPU if available, for faster differencing below
-        row_shifts = []
         shi = np.zeros((2,) + (steps, steps) + images.shape[1:])
         ref = np.zeros((steps, steps) + images.shape[1:])
 
@@ -781,7 +832,7 @@ def get_row_col_shifts3(images, interpolation_functions, transforms, image_indic
     return asnumpy(image_row_shifts)
 
 
-def get_interpolated_functions_and_transforms(images, scanangles, best_angle, best_speed, post_shifts, image_indices=None):
+def get_interpolated_functions_and_transforms(images, scanangles, best_angle, best_speed, post_shifts, image_indices=None, method="linear"):
     other_indices = get_indices_of_non_parallel_images(scanangles)
     indices = np.indices(images.shape[1:])
     if image_indices is None:
@@ -814,7 +865,15 @@ def get_interpolated_functions_and_transforms(images, scanangles, best_angle, be
         for index, j in enumerate(other_indices[i]):
             coords[index] = forward_transformed_coords[j]
             intens[index] = intensities[j]
-        tesselation = Delaunay(np.swapaxes(coords, 0, 1).reshape((2,-1)).T)
-        func = LinearNDInterpolator(tesselation, intens.flatten(), fill_value=np.nan)
+        points = np.swapaxes(coords, 0, 1).reshape((2,-1)).T
+        if method == 'linear':
+            tesselation = Delaunay(points)
+            func = LinearNDInterpolator(tesselation, intens.flatten(), fill_value=np.nan)
+        elif method == 'nearest':
+            func = NearestNDInterpolator(points, intens.flatten())
+        elif method == 'neighbor':
+            nn = KNeighborsRegressor(n_neighbors=5, weights='distance')
+            reg = nn.fit(points, intens.flatten())
+            func = reg.predict
         funcs.append(func)
     return funcs, transforms
