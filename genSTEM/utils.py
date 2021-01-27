@@ -2,6 +2,7 @@ import numpy as np
 from scipy.optimize import curve_fit
 from scipy.signal.windows import tukey
 from numba import jit
+from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 try:
     #raise ValueError() # Uncomment this to test numpy-version on cupy-enabled systems
@@ -123,3 +124,74 @@ def bilinear_interpolation(indices, intensities):
         weightimg[xi:xi+2, yi:yi+2] += square_weights
 
     return intimg, weightimg
+
+
+
+def colorbar(mappable):
+    "mappable is img = plt.imshow()"
+    ax = mappable.axes
+    fig = ax.figure
+    divider = make_axes_locatable(ax)
+    cax = divider.append_axes("right", size="5%", pad=0.05)
+    cax.aname = 'colorbar'
+    return fig.colorbar(mappable, cax=cax)
+
+from scipy import signal
+
+def gaussian_kernel(shape, std, normalised=False):
+    '''
+    Generates a n x n matrix with a centered gaussian 
+    of standard deviation std centered on it. If normalised,
+    its volume equals 1.'''
+    s0, s1 = shape
+    gaussian1D1 = signal.gaussian(s0, std)
+    if s0 == s1:
+        gaussian1D2 = gaussian1D1
+    else:
+        gaussian1D2 = signal.gaussian(s1, std)
+    gaussian2D = np.outer(gaussian1D1, gaussian1D2)
+    if normalised:
+        gaussian2D /= (2*np.pi*(std**2))
+    return gaussian2D
+
+def convolve2d_fft(arr1, arr2):
+    s0, s1 = arr1.shape
+    
+    conv = np.fft.irfft2(
+        np.fft.rfft2(arr1) * np.fft.rfft2(arr2), 
+        s=arr1.shape)
+    
+    conv = np.roll(
+        conv, 
+        (
+            -(s0 - 1 - (s0 + 1) % 2) // 2, 
+            -(s1 - 1 - (s1 + 1) % 2) // 2,
+        ),
+        axis=(0, 1))
+    return conv
+
+def convolve_pad_unpad(arr1, arr2, sigma=0.5, pad_multiplier=10):
+    conv = unpad_for_convolution(
+        convolve2d_fft(
+            pad_for_convolution(arr1, sigma, pad_multiplier), 
+            pad_for_convolution(arr2, sigma, pad_multiplier)
+        ),
+        sigma, pad_multiplier
+    )
+    return conv
+    
+
+def unpad(x, pad_width):
+    if isinstance(pad_width, int):
+        pad_width = len(x.shape) * ((pad_width, pad_width),)
+    slices = []
+    for c in pad_width:
+        e = None if c[1] == 0 else -c[1]
+        slices.append(slice(c[0], e))
+    return x[tuple(slices)]
+
+def pad_for_convolution(arr, sigma=0.5, pad_multiplier=10):
+    return np.pad(arr, int(pad_multiplier*sigma))
+
+def unpad_for_convolution(arr, sigma=0.5, pad_multiplier=10):
+    return unpad(arr, int(pad_multiplier*sigma))

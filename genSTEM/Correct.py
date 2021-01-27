@@ -52,16 +52,10 @@ def create_final_stack_and_average(images, scan_angles, best_str, best_angle, no
     warped_images_nonan = warped_images_with_nan.copy()
     warped_images_nonan[cp.isnan(warped_images_nonan)] = 0
 
-    warped_imgA = warped_images_nonan[0]
-    shifts = [(0,0)] # shift of the first image, which the rest are relative to
-    for warped_imgB in warped_images_nonan[1:]:
-        shift, m = hybrid_correlation(warped_imgA, warped_imgB, normalize=normalize_correlation)
-        shifts.append(shift)
-    shifts = cp.array(np.array(shifts))
-
+    shifts, m = hybrid_correlation_images(warped_images_nonan)
 
     corrected_images = warped_images_with_nan.copy()
-    corrected_images[1:] =  cp.stack([translate(img, shift[::-1], cval=cp.nan) for img, shift in zip(warped_images_with_nan[1:], shifts[1:])])
+    corrected_images[1:] = cp.stack([translate(img, shift[::-1], cval=cp.nan) for img, shift in zip(warped_images_with_nan[1:], shifts[1:])])
     
     if subpixel:
         subpixel_images = []
@@ -76,7 +70,7 @@ def create_final_stack_and_average(images, scan_angles, best_str, best_angle, no
 
     return asnumpy(mean_image), shifts
     
-def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlation=True, debug=False, correlation_power=0.8, low_drift=False):
+def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlation=True, debug=False, correlation_power=0.8, low_drift=False, update_gcf=True):
     """Estimates the global, constant drift on an image using affine transformations.
     Takes as input a list of images and scan angles. Only tested with square images.
 
@@ -102,11 +96,9 @@ def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlati
         images, 
         scan_angles, 
         [0], [0], 
-        normalize_correlation=normalize_correlation, 
         correlation_power=correlation_power)
-    maxes = all_maxes.reshape((-1, len(images)-1)).mean(1)
 
-    best_angle, best_str, fit_value = 0, 0, maxes.max()
+    best_angle, best_str, fit_value = 0, 0, all_maxes.max()
     history = [(best_angle, best_str, fit_value)]
 
     old_values = fit_value
@@ -137,9 +129,9 @@ def estimate_drift(images, scan_angles, tolerancy_percent=1, normalize_correlati
                 scan_angles,
                 drift_angles, 
                 drift_speeds,
-                normalize_correlation=normalize_correlation,
                 correlation_power=correlation_power,
                 image_number=i+j,
+                update_gcf=update_gcf,
             )
             history.append((best_angle, best_str, fit_value))
             new_values = fit_value
@@ -226,7 +218,7 @@ def hybrid_correlation(
     img2,
     p=0.8,
     normalize = True, 
-    window=True,
+    window="tukey",
     window_strength=0.1,
     fit_only = False,
     ):
@@ -253,6 +245,7 @@ def hybrid_correlation(
 
     fftimg1 = cp.fft.rfft2(img1)
     fftimg2 = cp.fft.rfft2(img2)
+
     
     m = fftimg1 * cp.conj(fftimg2)
     corr =  cp.fft.irfft2(cp.abs(m)**p * cp.exp(1j * cp.angle(m)))
@@ -298,7 +291,19 @@ def hybrid_correlation_prefft_all(fftimages, p=0.8, fit_only=False):
         center = cp.array(corr.shape[1:]) // 2
         max_coord = cp.array(cp.unravel_index(corr.argmax(axis=(-2, -1)), corr[0].shape), dtype=int).T
         shift = max_coord - center
-        return shift, score.mean()
+        shifts = cp.zeros((len(fftimages), 2))
+        shifts[1:] = shift
+        return shifts, score.mean()
+
+def hybrid_correlation_images(images, p=0.8, fit_only=False, window="tukey", window_strength=0.1):
+    images_fft = prepare_correlate(images, window=window, window_strength=window_strength)
+    result = hybrid_correlation_prefft_all(images_fft, p=p, fit_only=fit_only)
+    if fit_only:
+        score = result
+        return score
+    else:
+        shift, score = result
+        return shift, score
 
 def hybrid_correlation_prefft(
     fftimg1, 
@@ -325,6 +330,8 @@ def hybrid_correlation_prefft(
 
 def translate(img, shift, cval=0):
     sx, sy = shift
+    if cval is True:
+        cval = np.nan
     return affine_transform(
         img,
         cp.asarray(
@@ -351,7 +358,7 @@ def transform_drift_scan(scan_angle=0, drift_angle=0, drift_speed=0, xlen=100):
         drift_speed = drift_speed[:, None, None]
     angle = np.deg2rad(drift_angle + scan_angle)
     arr[...] = np.eye(3)
-    s_sin = drift_speed*(np.sin(angle)) # used to use make_zero_zero on this, but it breaks it?
+    s_sin = drift_speed*(np.sin(angle)) 
     s_cos = drift_speed*(np.cos(angle))
     arr[..., 0,0] = 1 - s_cos
     arr[..., 0,1] = -s_cos*xlen
@@ -361,18 +368,20 @@ def transform_drift_scan(scan_angle=0, drift_angle=0, drift_speed=0, xlen=100):
     arr[..., 1,2] = -s_sin
     return arr.squeeze()
 
-def warp_images(images, scan_angles, drift_speed=0, drift_angle=0):
-    warped_images = [warp_image(img, scan, drift_speed, drift_angle) for img, scan in zip(images, scan_angles)]
-    return warped_images
+def warp_images(images, scan_angles, drift_speed=0, drift_angle=0, nan=False):
+    warped_images = [warp_image(img, scan, drift_speed, drift_angle, nan=nan) for img, scan in zip(images, scan_angles)]
+    return cp.array(warped_images)
 
-def warp_and_shift_images(images, scan_angles, drift_speed=0, drift_angle=0):
-    warped_images = [warp_image(img, scan, drift_speed, drift_angle) for img, scan in zip(images, scan_angles)]
-    translated_images = [warped_images[0]]
+def warp_and_shift_images(images, scan_angles, drift_speed=0, drift_angle=0, nan=False):
+    warped_images = warp_images(images, scan_angles, drift_speed, drift_angle, nan=False)
+    shifts, _ = hybrid_correlation_images(warped_images)
+    if nan:
+        warped_images = warp_images(images, scan_angles, drift_speed, drift_angle, nan=nan)
 
-    shifts = [hybrid_correlation(warped_images[0], img)[0] for img in warped_images[1:]]
-    translated_images += [translate(img, shift[::-1]) for img, shift in zip(warped_images[1:], shifts)]
-    translated_images = cp.array(translated_images)
-    return translated_images
+    translated_images = cp.zeros(images.shape)
+    for i, (img, shift) in enumerate(zip(warped_images, shifts)):
+        translated_images[i] = translate(img, shift[::-1], cval=nan)
+    return translated_images, shifts
 
 def add_shifts_and_rotation_to_transform(transform, image_shape, scan_rotation_deg, post_shifts=[0,0]):
     shift1, shift2 = (np.array(image_shape) - 1) / 2
@@ -403,20 +412,23 @@ def add_shifts_only_to_transform(transform, image_shape, scan_rotation_deg, ):#p
 
 def warp_image(img, scanrotation, drift_speed, drift_angle, nan=False, post_shifts=[0,0]):
     drift_transform = transform_drift_scan(
-         -scanrotation, 
+         -scanrotation,
          drift_angle, 
          drift_speed, 
          img.shape[-2])
     T = add_shifts_and_rotation_to_transform(drift_transform, img.shape, scanrotation, post_shifts)
     cval = cp.nan if nan else 0 # value of pixels that were outside the image border
+    T2 = swap_transform_standard(T.get_matrix()).copy()
+    T3 = cp.array(T2)
+    T4 = cp.linalg.inv(T3)
     return affine_transform(
         img, 
-        cp.linalg.inv(cp.asarray(swap_transform_standard(T.get_matrix()))),
+        T4,
         order=1,
         cval=cval)
 
-def warp_and_correlate(images, scan_angles, drift_angles, speeds, normalize_correlation=False, correlation_power=0.8):
-    all_maxes = []
+def warp_and_correlate(images, scan_angles, drift_angles, speeds, correlation_power=0.8):
+    scores = cp.zeros((len(drift_angles), len(speeds)))
     pairs = []
 
     for ai, drift_angle in tqdm(
@@ -425,59 +437,47 @@ def warp_and_correlate(images, scan_angles, drift_angles, speeds, normalize_corr
         total=len(drift_angles),
         leave=True):
         
-        angle_maxes = []
-        for si, speed in tqdm(
-            enumerate(speeds), 
-            desc="Iterating through drift speeds", 
-            total=len(speeds),
-            leave=False):
-            current_maxes = []
-            current_shifts = []
-            warped_imgA = warp_image(images[0], scan_angles[0], speed, drift_angle)
-            
-            speed_maxes = []
-            for img, scanangle in zip(images[1:], scan_angles[1:]):
-                warped_imgB = warp_image(img, scanangle, speed, drift_angle)
-                m = hybrid_correlation(warped_imgA, warped_imgB, fit_only=True, normalize=normalize_correlation, p=correlation_power)
-                speed_maxes.append(m.item())
-            angle_maxes.append(speed_maxes)
+        for si, speed in tqdm(enumerate(speeds), desc="Iterating through drift speeds", 
+            total=len(speeds), leave=False):
+            wimages = warp_images(images, scan_angles, speed, drift_angle)
+            score = hybrid_correlation_images(wimages, p=correlation_power, fit_only=True)
+            scores[ai, si] = score
             pairs.append((drift_angle, speed))
-        all_maxes.append(angle_maxes)
-    return np.array(all_maxes), np.array(pairs)
+    return asnumpy(scores), np.array(pairs)
 
-def get_best_angle_speed_shifts(images, scan_angles, drift_angles, drift_speeds, normalize_correlation=False, correlation_power=0.8, image_number=0):
+def get_best_angle_speed_shifts(images, scan_angles, drift_angles, drift_speeds, correlation_power=0.8, image_number=0, update_gcf=True):
     
-    all_maxes, pairs = warp_and_correlate(images, scan_angles, drift_angles, drift_speeds, normalize_correlation=normalize_correlation, correlation_power=correlation_power)
-    angle_fit = all_maxes.mean(axis=(1,2))
-    str_fit = all_maxes.mean(axis=(0,2))
+    all_maxes, pairs = warp_and_correlate(images, scan_angles, drift_angles, drift_speeds, correlation_power=correlation_power)
+    angle_fit = all_maxes.mean(axis=(1))
+    str_fit = all_maxes.mean(axis=(0))
 
     s, a = np.meshgrid(drift_speeds*images[0].shape[0], np.deg2rad(drift_angles))
     
-    m = all_maxes.mean(-1)
+    m = all_maxes
 
-    maxes = np.mean(all_maxes.reshape((-1, len(images)-1)), 1)
+    maxes = all_maxes.flatten()
     i = maxes.argmax() # take the mean over each set of images
     best_drift_angle, best_drift_speed = pairs[i]
 
+    if update_gcf:
+        fig = plt.gcf()
+        fig.clear()
+        ax1 = fig.add_subplot(131)
+        ax2 = fig.add_subplot(132)
+        ax3 = fig.add_subplot(133, projection="polar")
+        
+        ax1.scatter(drift_angles, angle_fit)
+        ax2.plot(drift_speeds*images.shape[1], str_fit)
+        ax3.pcolormesh(a,s,m, shading="nearest", cmap='jet')
 
-    fig = plt.gcf()
-    fig.clear()
-    ax1 = fig.add_subplot(131)
-    ax2 = fig.add_subplot(132)
-    ax3 = fig.add_subplot(133, projection="polar")
-    
-    ax1.scatter(drift_angles, angle_fit)
-    ax2.plot(drift_speeds*images.shape[1], str_fit)
-    ax3.pcolormesh(a,s,m, shading="nearest", cmap='jet')
-
-    x, y = np.deg2rad(best_drift_angle), drift_speeds[0].item() * images.shape[1]
-    dx, dy = 0, best_drift_speed* images.shape[1] - y
-    ax1.set(title='Testing angles', xlabel='Angles (°)', ylabel='Fit (Average over drift speeds)')
-    ax2.set(title='Testing drift speeds', xlabel='Drift Speed (A.U.)', ylabel='Fit (Average over drift angles)')
-    ax3.set(title='Radial fit representation', ylim = (s.min(), s.max()), yticklabels=[])
-    ax3.annotate("", xy=(x+dx, y+dy), xytext=(x, y), arrowprops=dict(color="k"))
-    fig.tight_layout()
-    fig.canvas.draw()
+        x, y = np.deg2rad(best_drift_angle), drift_speeds[0].item() * images.shape[1]
+        dx, dy = 0, best_drift_speed* images.shape[1] - y
+        ax1.set(title='Testing angles', xlabel='Angles (°)', ylabel='Fit (Average over drift speeds)')
+        ax2.set(title='Testing drift speeds', xlabel='Drift Speed (A.U.)', ylabel='Fit (Average over drift angles)')
+        ax3.set(title='Radial fit representation', ylim = (s.min(), s.max()), yticklabels=[])
+        ax3.annotate("", xy=(x+dx, y+dy), xytext=(x, y), arrowprops=dict(color="k"))
+        fig.tight_layout()
+        fig.canvas.draw()
     return best_drift_angle, best_drift_speed, maxes[i]
 
 def drift_values_converged(old_values, new_values, tolerancy_percent=1):
@@ -585,7 +585,7 @@ def bilinear_bincount_numpy(points, intensities):
 
     shifts = np.array([[0, 0], [0, 1], [1, 0], [1, 1]])
     indices = floored_indices[:, None] + shifts
-    indices = (indices * (shape[0], 1)).sum(-1)
+    indices = (indices * (shape[1], 1)).sum(-1)
     weights = np.array([w1, w2, w3, w4]).T
 
     weight_bins = np.bincount(indices.flatten(), weights=weights.flatten())
@@ -613,7 +613,6 @@ def bilinear_bincount_cupy(points, intensities):
     low0, low1 = floored_indices.min(0)
     high0, high1 = floored_indices.max(0)
     floored_indices = floored_indices - cp.array([low0, low1])
-    print(low0, high0, low1, high1)
     shape = cp.array([high0 - low0 + 2, high1-low1 + 2])
 
     upper_diff = ceil - points
@@ -626,7 +625,7 @@ def bilinear_bincount_cupy(points, intensities):
 
     shifts = cp.array([[0, 0], [0, 1], [1, 0], [1, 1]])
     indices = floored_indices[:, None] + shifts
-    indices = (indices * cp.array([shape[0].item(), 1])).sum(-1)
+    indices = (indices * cp.array([shape[1].item(), 1])).sum(-1)
     weights = cp.array([w1, w2, w3, w4]).T
 
     # These bins only fill up to the highest index - not to shape[0]*shape[1]
@@ -637,7 +636,6 @@ def bilinear_bincount_cupy(points, intensities):
     all_weight_bins = cp.zeros(cp.prod(shape).item())
     all_intens_bins = cp.zeros_like(all_weight_bins)
     # And fill it here
-    print(all_weight_bins.shape, weight_bins.shape)
     all_weight_bins[:len(weight_bins)] = weight_bins
     all_intens_bins[:len(weight_bins)] = intens_bins
 
@@ -667,20 +665,24 @@ def abs_difference(original, reference):
     reference = reference.reshape((-1, shape[-1]))
     return np.nanmean(np.abs(original - reference), axis=-1).reshape(shape[:-1])
 
-def make_final_image(images, transforms, corrected_indices, subpixel_factor=1):
+def make_final_image(images, transforms, corrected_indices, subpixel_factor=1, offset=(0,0), method="linear", neighbors=8, neighbor_weights="distance"):
     "Should add option to specify which positions one wants to interpolate"
-    coords = []
+    points = []
     for i in range(len(images)):
-        coords.append(transform_points(corrected_indices[i], swap_transform_standard(transforms[i])))
-    coords = np.array(coords)
-    tesselation = Delaunay(np.swapaxes(coords, 0, 1).reshape((2,-1)).T)
-    func = LinearNDInterpolator(tesselation, asnumpy(images.flatten()), fill_value=np.nan)
+        points.append(transform_points(corrected_indices[i], swap_transform_standard(transforms[i])))
+    points = np.array(points)
+    points = np.swapaxes(points, 0, 1).reshape((2,-1)).T
+    intensities = asnumpy(images.flatten())
+    func = get_interpolation_function(points, intensities, method=method, neighbors=neighbors, neighbor_weights=neighbor_weights)
+
     indices = np.mgrid[
-        :images.shape[1]-1/subpixel_factor:subpixel_factor*images.shape[1]*1j, 
-        :images.shape[2]-1/subpixel_factor:subpixel_factor*images.shape[2]*1j
+        offset[0]: offset[0] + images.shape[1]-1/subpixel_factor:subpixel_factor*images.shape[1]*1j, 
+        offset[1]: offset[1] + images.shape[2]-1/subpixel_factor:subpixel_factor*images.shape[2]*1j
     ]
     final_img = func(indices.reshape((2, -1)).T).reshape(indices.shape[1:])
     return final_img
+
+
 
 
 def get_row_shifts(images, interpolation_functions, transforms, image_indices=None, max_pixel_shift=1, steps=11):
@@ -832,7 +834,7 @@ def get_row_col_shifts3(images, interpolation_functions, transforms, image_indic
     return asnumpy(image_row_shifts)
 
 
-def get_interpolated_functions_and_transforms(images, scanangles, best_angle, best_speed, post_shifts, image_indices=None, method="linear"):
+def get_interpolated_functions_and_transforms(images, scanangles, best_angle, best_speed, post_shifts, image_indices=None, method="linear", neighbors=8):
     other_indices = get_indices_of_non_parallel_images(scanangles)
     indices = np.indices(images.shape[1:])
     if image_indices is None:
@@ -866,14 +868,55 @@ def get_interpolated_functions_and_transforms(images, scanangles, best_angle, be
             coords[index] = forward_transformed_coords[j]
             intens[index] = intensities[j]
         points = np.swapaxes(coords, 0, 1).reshape((2,-1)).T
-        if method == 'linear':
-            tesselation = Delaunay(points)
-            func = LinearNDInterpolator(tesselation, intens.flatten(), fill_value=np.nan)
-        elif method == 'nearest':
-            func = NearestNDInterpolator(points, intens.flatten())
-        elif method == 'neighbor':
-            nn = KNeighborsRegressor(n_neighbors=5, weights='distance')
-            reg = nn.fit(points, intens.flatten())
-            func = reg.predict
+        func = get_interpolation_function(points, intens, method, neighbors)
         funcs.append(func)
     return funcs, transforms
+
+def get_interpolation_function(points, intensities, method='linear', neighbors=8, neighbor_weights="distance"):
+    if method == 'linear':
+        tesselation = Delaunay(points)
+        func = LinearNDInterpolator(tesselation, intensities.flatten(), fill_value=np.nan)
+    elif method == 'nearest':
+        func = NearestNDInterpolator(points, intensities.flatten())
+    elif method == 'cubic':
+        tesselation = Delaunay(points)
+        func = CloughTocher2DInterpolator(tesselation, intensities.flatten(), fill_value=np.nan)
+    elif method == 'neighbor':
+        nn = KNeighborsRegressor(n_neighbors=neighbors, weights=neighbor_weights)
+        reg = nn.fit(points, intensities.flatten())
+        func = reg.predict
+    return func
+
+def bilinear_2(points, intensity):
+    # Create empty matrices, starting from 0 to p.max
+    w = np.zeros((points[:, 0].max().astype(int) + 2, points[:, 1].max().astype(int) + 2))
+    i = np.zeros_like(w)
+    
+    # Calc weights
+    floor = np.floor(points)
+    ceil = floor + 1
+    upper_diff = ceil - points
+    lower_diff = points - floor
+    w1 = upper_diff[:, 0] * upper_diff[:, 1]
+    w2 = upper_diff[:, 0] * lower_diff[:, 1]
+    w3 = lower_diff[:, 0] * upper_diff[:, 1]
+    w4 = lower_diff[:, 0] * lower_diff[:, 1]
+    
+    # Get indices
+    ix, iy = floor[:, 0].astype(int), floor[:, 1].astype(int)
+
+    # Use np.add.at. See, https://numpy.org/doc/stable/reference/generated/numpy.ufunc.at.html
+    np.add.at(w, (ix, iy), w1)
+    np.add.at(w, (ix, iy+1), w2)
+    np.add.at(w, (ix+1, iy), w3)
+    np.add.at(w, (ix+1, iy+1), w4)
+
+    np.add.at(i, (ix, iy), w1 * intensity)
+    np.add.at(i, (ix, iy+1), w2 * intensity)
+    np.add.at(i, (ix+1, iy), w3 * intensity)
+    np.add.at(i, (ix+1, iy+1), w4 * intensity)
+    
+    # Clip (to accomodate image size to be the same as your bilinear function)
+    iix, iiy = points[:, 0].min().astype(int), points[:, 1].min().astype(int)
+    i, w = i[iix:, iiy:], w[iix:, iiy:]
+    return i, w

@@ -26,7 +26,7 @@ def get_example_atoms():
     atoms.numbers[346] = 80
     return atoms
 
-def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, minScanAngle=0, maxScanAngle=360, drift_speed=5, drift_angle=None, jitter_strength=0., centre_drift=True, random_offset=False, square=True, **kwargs):
+def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, minScanAngle=0, maxScanAngle=360, drift_speed=5, drift_angle=None, jitter_strength=0., centre_drift=True, random_offset=False, square=False, **kwargs):
     '''Quickly generate images of a atoms object taken at various scan angles.
     TODO: Add option for random translation on each image, so that we don't accidentally have a perfectly centered image stack
     
@@ -436,7 +436,7 @@ class ImageModel:
         scale = (xhigh - xlow)/100
         if self.random_offset:
             if self.random_offset is True:
-                self.random_offset = 5
+                self.random_offset = 2
             dX = (2*np.random.random()-1) * self.random_offset
             dY = (2*np.random.random()-1) * self.random_offset
             xlow += dX
