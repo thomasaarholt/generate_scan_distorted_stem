@@ -27,7 +27,9 @@ def normalize_many(imgs, window):
     axes = (-2,-1)
     return window * (
         imgs - np.expand_dims(
-            (imgs * window).mean(axis=axes), axes) / np.mean(window)
+            (imgs * window).mean(axis=axes), 
+            axes
+            ) / np.mean(window)
     )
 
 def normalize_one(imgs, window):
@@ -138,20 +140,20 @@ def colorbar(mappable):
 
 from scipy import signal
 
-def gaussian_kernel(shape, std, normalised=False):
+def gaussian_kernel(shape, std, normalised=False, mult=1):
     '''
     Generates a n x n matrix with a centered gaussian 
     of standard deviation std centered on it. If normalised,
     its volume equals 1.'''
     s0, s1 = shape
-    gaussian1D1 = signal.gaussian(s0, std)
+    gaussian1D1 = mult*signal.gaussian(s0, std)
     if s0 == s1:
         gaussian1D2 = gaussian1D1
     else:
-        gaussian1D2 = signal.gaussian(s1, std)
-    gaussian2D = np.outer(gaussian1D1, gaussian1D2)
+        gaussian1D2 = mult*signal.gaussian(s1, std) 
+    gaussian2D = np.outer(gaussian1D1, gaussian1D2) 
     if normalised:
-        gaussian2D /= (2*np.pi*(std**2))
+           gaussian2D /= (2*np.pi*(std**2))
     return gaussian2D
 
 def convolve2d_fft(arr1, arr2):

@@ -5,7 +5,7 @@ import matplotlib.cm
 from tqdm.auto import tqdm
 from matplotlib.transforms import Affine2D
 from matplotlib.patches import Arrow
-
+from ase.build import make_supercell
 
 from .utils import cp, asnumpy
 
@@ -120,34 +120,8 @@ def drift_points_readable(shape=(10,10), drift_speed=0, drift_angle=0):
     arr = np.zeros((lenX, lenY, 2))
     for yi in range(lenY):
         for xi in range(lenX):
-            drift += drift_vector
             arr[xi, yi] = (xi, yi) - drift
-    return arr
-
-def drift_points_readable2(shape=(10,10), drift_speed=0, drift_angle = 0):
-    '''Calculate pixel coordinates for an image with uniform drift.
-    
-    Parameters
-    ----------
-    shape: tuple of int
-        Shape of image array.
-    drift_speeed: int.
-        Total drift speed in units of drift_pixels/total_image_pixels.
-    drift_angle: float, int
-        Angle of drift in degrees.  This provides the angle of the unit vector provided to ImageModel.
-        
-    Returns
-    -------
-    ndarray of new pixel coordinates after drift with shape (*shape, 2)
-    '''
-    lenX, lenY = shape
-    drift_vector = (rotation_matrix(drift_angle) @ [1,0]) * drift_speed
-    drift = np.zeros(2)
-    arr = np.zeros((lenX, lenY, 2))
-    for yi in range(lenY):
-        for xi in range(lenX):
             drift += drift_vector
-            arr[xi, yi] = (xi, yi) - drift
     return arr
 
 def plot(points, ax, lim=((),())):
@@ -185,7 +159,7 @@ def calculate_transform_matrix(points, prime):
     points = extend_3D_ones(points)
     prime = extend_3D_ones(prime)
     T, *_ = np.linalg.lstsq(points, prime, rcond=None)
-    return T
+    return T.T
 
 def transform_points(points: "(2, N)", transform: "(3,3)"):
     '''Transform a 2D points array (2, N) by a 3x3 transform
@@ -369,6 +343,7 @@ class ImageModel:
     random_offset: bool, float
         Add a random offset to the initial probe position to avoid
         the generated images automatically being centered wrt eachother
+    periodic_boundary: stack the atoms object under the hood to hide "vacuum" 
     '''
 
     def __init__(
@@ -379,9 +354,18 @@ class ImageModel:
         jitter_horizontal=True, jitter_vertical=False,
         sigma=0.4, power=1.8, 
         centre_drift=True, square = False, vacuum=5.0, fast=False,
-        random_offset=False):
+        random_offset=False, periodic_boundary=True):
 
         if atoms:
+            xlow, ylow = atoms.positions[:,:2].min(0) - vacuum
+            xhigh, yhigh = atoms.positions[:,:2].max(0) + vacuum
+            mx = atoms.positions[:,:2].max(0)
+            self.limits = (xlow, ylow, xhigh, yhigh)
+            self.atoms = atoms
+            if periodic_boundary:
+                atoms = make_supercell(atoms, np.diag([3,3,1]))
+                atoms.positions[:,:2] -= mx
+                self.atoms2 = atoms
             self.atom_positions = atoms.positions[:,:2]
             self.atom_numbers = atoms.numbers
         else:
@@ -391,6 +375,9 @@ class ImageModel:
             )
             self.atom_positions = positions[:,:2]
             self.atom_numbers = numbers
+            xlow, ylow = positions.min(0) - vacuum
+            xhigh, yhigh = positions.max(0) + vacuum
+            self.limits = xlow, ylow, xhigh, yhigh
 
         if fast: # For each unique XY position, only keep one atom. Much faster, but will miss atoms.
             unique = np.unique(np.column_stack([self.atom_positions, self.atom_numbers]), axis=0)
@@ -431,8 +418,7 @@ class ImageModel:
 
     def create_probe_positions(self):
         '''Create probe positions with experimental artifacts.'''
-        xlow, ylow = self.atom_positions.min(0) - self.margin
-        xhigh, yhigh = self.atom_positions.max(0) + self.margin
+        xlow, ylow, xhigh, yhigh = self.limits
         scale = (xhigh - xlow)/100
         if self.random_offset:
             if self.random_offset is True:

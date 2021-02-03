@@ -258,19 +258,26 @@ def hybrid_correlation(
     center = cp.array(corr.shape) // 2
     return [x.item() for x in translation - center], corr.max()
 
+def get_tukey_window(shape, alpha=0.1):
+    return cp.asarray(tukey_window(shape, alpha=alpha))
+
 def prepare_correlate(images, window="tukey", window_strength=0.1):
     """Prepare images for hybrid correlation by windowing, normalizing, padding
      and taking the fft
     """
     if window == "tukey":
-        window = cp.asarray(tukey_window(images.shape[1:], alpha=window_strength))
-    else:
+        window = get_tukey_window(images.shape[-2:], window_strength)
+    elif window is None:
         window = 1
+    # Else window can be a finished window object
 
     images = normalize_many(images, window)
     padsize1 = images.shape[1] // 4
     padsize2 = images.shape[2] // 4
-    images = cp.pad(images, ((0,0), (padsize1, padsize1), (padsize2, padsize2)))
+
+    leading_dims = len(images.shape) - 2
+
+    images = cp.pad(images, leading_dims * ((0,0),) + ((padsize1, padsize1), (padsize2, padsize2)))
     fftimages = cp.fft.rfft2(images)
     return fftimages
 
@@ -285,7 +292,7 @@ def hybrid_correlation_prefft_all(fftimages, p=0.8, fit_only=False):
     score = corr.max(axis=(-2, -1))
 
     if fit_only:
-        return score.mean()
+        return score.mean(0)
     else:
         corr = cp.fft.fftshift(corr, axes=(-2,-1))
         center = cp.array(corr.shape[1:]) // 2
@@ -362,7 +369,7 @@ def transform_drift_scan(scan_angle=0, drift_angle=0, drift_speed=0, xlen=100):
     s_cos = drift_speed*(np.cos(angle))
     arr[..., 0,0] = 1 - s_cos
     arr[..., 0,1] = -s_cos*xlen
-    arr[..., 0,2] = -s_cos    
+    arr[..., 0,2] = -s_cos
     arr[..., 1,0] = -s_sin
     arr[..., 1,1] = 1 - s_sin*xlen
     arr[..., 1,2] = -s_sin
@@ -588,25 +595,21 @@ def bilinear_bincount_numpy(points, intensities):
     indices = (indices * (shape[1], 1)).sum(-1)
     weights = np.array([w1, w2, w3, w4]).T
 
-    weight_bins = np.bincount(indices.flatten(), weights=weights.flatten())
-    intens_bins = np.bincount(indices.flatten(), weights=(intensities[:, None]*weights).flatten())
+    weight_bins = np.bincount(indices.flatten(), weights=weights.flatten(), minlength = np.prod(shape))
+    intens_bins = np.bincount(indices.flatten(), weights=(intensities[:, None]*weights).flatten(), minlength = np.prod(shape))
 
-    all_weight_bins = np.zeros(np.prod(shape))
-    all_intens_bins = np.zeros(np.prod(shape))
-
-    all_weight_bins[:len(weight_bins)] = weight_bins
-    all_intens_bins[:len(weight_bins)] = intens_bins
-
-    weight_image = all_weight_bins.reshape(shape)
-    intens_image = all_intens_bins.reshape(shape)
+    weight_image = weight_bins.reshape(shape)
+    intens_image = intens_bins.reshape(shape)
     return intens_image, weight_image
 
-def bilinear_bincount_cupy(points, intensities):
+def bilinear_bincount_cupy(points, intensities, subpixel=1):
     """Bilinear weighting of points onto a grid.
     Extent of grid given by min and max of points in each dimension
     points should be a cupy array of shape (N, 2)
     intensity should be a cupy array of shape (N,)
     """
+
+    points = subpixel * points
     floor = cp.floor(points)
     ceil = floor + 1
     floored_indices = cp.array(floor, dtype=int)
@@ -628,19 +631,11 @@ def bilinear_bincount_cupy(points, intensities):
     indices = (indices * cp.array([shape[1].item(), 1])).sum(-1)
     weights = cp.array([w1, w2, w3, w4]).T
 
-    # These bins only fill up to the highest index - not to shape[0]*shape[1]
-    weight_bins = cp.bincount(indices.flatten(), weights=weights.flatten())
-    intens_bins = cp.bincount(indices.flatten(), weights=(intensities[:, None]*weights).flatten())
-    
-    # So we create a zeros array that is big enough
-    all_weight_bins = cp.zeros(cp.prod(shape).item())
-    all_intens_bins = cp.zeros_like(all_weight_bins)
-    # And fill it here
-    all_weight_bins[:len(weight_bins)] = weight_bins
-    all_intens_bins[:len(weight_bins)] = intens_bins
+    weight_bins = np.bincount(indices.flatten(), weights=weights.flatten(), minlength = np.prod(shape).item())
+    intens_bins = np.bincount(indices.flatten(), weights=(intensities[:, None]*weights).flatten(), minlength = np.prod(shape).item())
 
-    weight_image = all_weight_bins.reshape(shape.get())
-    intens_image = all_intens_bins.reshape(shape.get())
+    weight_image = weight_bins.reshape(shape.get())
+    intens_image = intens_bins.reshape(shape.get())
     return intens_image, weight_image
 
 def get_indices_of_non_parallel_images(scanangles):

@@ -5,7 +5,6 @@ setup(name='genSTEM',
       packages=['genSTEM'],
       install_requires = [
           'numpy',
-          #'cupy',
           'sympy',
           'ase'
       ]
