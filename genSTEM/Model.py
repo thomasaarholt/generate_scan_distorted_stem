@@ -453,6 +453,7 @@ class ImageModel:
         self.scan_rotation = scan_rotation
         self.square = square
         self.margin = vacuum
+        self.periodic_boundary = periodic_boundary
 
         self.random_offset = random_offset
 
@@ -509,6 +510,8 @@ class ImageModel:
 
         if self.drift_speed:
             if self.drift_by_transform:
+                if self.periodic_boundary:
+                    self.kwargs_affine['mode'] = 'wrap'
                 self.probe_positions = add_drift_by_transform(self.probe_positions,
                     self.scan_rotation, self.drift_speed, self.drift_angle,
                     kwargs_affine=self.kwargs_affine)
