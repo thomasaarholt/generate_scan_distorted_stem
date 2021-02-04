@@ -3,11 +3,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.cm
 from tqdm.auto import tqdm
+from skimage.transform import warp
 from matplotlib.transforms import Affine2D
 from matplotlib.patches import Arrow
 from ase.build import make_supercell
 
-from .utils import cp, asnumpy
+from .utils import (cp, asnumpy, swap_transform_standard)
+from .transform import (transform_drift_scan, add_shifts_and_rotation_to_transform)
 
 def get_example_atoms():
     "Simple interesting-looking structure for testing"
@@ -26,9 +28,9 @@ def get_example_atoms():
     atoms.numbers[346] = 80
     return atoms
 
-def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, minScanAngle=0, maxScanAngle=360, drift_speed=5, drift_angle=None, jitter_strength=0., centre_drift=True, random_offset=False, square=False, **kwargs):
+def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, minScanAngle=0, maxScanAngle=360, drift_speed=5, drift_angle=None, jitter_strength=0., centre_drift=False, random_offset=False, square=False, kwargs_affine={}, **kwargs):
     '''Quickly generate images of a atoms object taken at various scan angles.
-    TODO: Add option for random translation on each image, so that we don't accidentally have a perfectly centered image stack
+    TODO: Add option for random translation on each image, so that we doven't accidentally have a perfectly centered image stack
     
     Parameters
     ----------
@@ -69,7 +71,7 @@ def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, m
         random_angle = np.random.random() * 2*np.pi
     else:
         random_angle = drift_angle
-    drift_vector = [np.cos(random_angle),np.sin(random_angle)]
+    #drift_vector = [np.cos(random_angle),np.sin(random_angle)]
     
     images = []
 
@@ -79,7 +81,7 @@ def get_rotation_series(atoms = None, vacuum=10., pixel_size = 0.1, nImages=4, m
         model = ImageModel(atoms, scan_rotation=scanangle,
                     pixel_size=pixel_size, vacuum=vacuum,
                         drift_speed=drift_speed, 
-                        drift_vector=drift_vector,
+                        drift_angle=drift_angle,
                         jitter_strength=jitter_strength, 
                         centre_drift=centre_drift,
                         jitter_vertical=True,
@@ -249,15 +251,15 @@ def add_ac_noise(shape, strength=0.5, dwelltime=1e-6, ac_freq=50):
     ).reshape(shape)
     return noise
     
-def add_drift(XYshape, drift_vector = [1,0], drift_speed=1e-4):
+def add_drift_by_px(XYshape, drift_speed=1e-4, drift_angle = 0):
     '''Provide the pixel cordinate shift as a result of drift.
     
     Parameters
     ----------
     XYshape: tuple of int
         Shape of the probe positions. (2, X, Y)
-    drift_vector: length-2 vector
-        Direction of drift.
+    drift_angle: float
+        Drift angle in degrees.
     drift_speed: float
         Drift speed in number of pixels.
         Automatically divided by total number of images pixels within the function.
@@ -268,10 +270,56 @@ def add_drift(XYshape, drift_vector = [1,0], drift_speed=1e-4):
     ndarray of pixel shift after drift.
     '''
     drift_speed /= np.prod(XYshape) #total number of pixels
-    drift_vector = -cp.array(drift_vector)
+    angle = cp.deg2rad(drift_angle)
+    drift_vector = -cp.array([cp.cos(angle), cp.sin(angle)])
     probe_indices = cp.arange(cp.prod(cp.array(XYshape))).reshape(XYshape)
     return (drift_speed * drift_vector * probe_indices.T[..., None]).T
+
+def add_drift_by_transform(coords, scan_rotation, drift_speed, drift_angle, add_drift=True, post_shifts=[0,0], kwargs_affine={}):
+    '''
+    coords: numpy like 
+        (2,M,N) matrix describing the coordiantes of the image.
+    scan_rotation: float
+        Angle of the fast-scan direction in degrees.
+    drift_speed: float
+        Automatically divided by image shape - should be 0-10.
+    drift_angle: float
+        Drift angle in degrees.
+    add_drift: Boolean
+        If True then drift is added. If False then drift is removed.
+        
+    kwargs_affine
+    cval:
+        The value to populate outside the image boarder. Default is 0. Another useful values is cp.NaN.
+        
+    TODO
+    -----
+    Scipy affine_transform v<1.6.0 does not support anything other than mode='constant, so I used skimag's warp function.
+    Warp does not handle cupy arrays. So it is converted to a numpy array, which is not ideal but functional.
+    '''
+    coords = coords.T #swaps to (N,M,2)
+    XYshape = coords.shape[:2]
+    drift_speed /= np.prod(XYshape)
+    drift_transform = transform_drift_scan(
+         -scan_rotation,
+         drift_angle, 
+         drift_speed, 
+         XYshape[0])
+
+    T = Affine2D(drift_transform)
+    if 'cval' not in kwargs_affine:
+        kwargs_affine['cval'] = cp.nan
+
+    T2 = cp.array(T.get_matrix().copy())
+    if add_drift:
+        T3 = T2
+    else:
+        T3 = cp.linalg.inv(T3)
     
+    #return affine_transform(coords, T3,order=1, **kwargs_affine).T
+    return cp.array(warp(coords.get(),
+                         swap_transform_standard(T3).get(),
+                         order=1, **kwargs_affine)).T    
 
 def add_line_jitter(XYshape, strength = 0.3, horizontal=True, vertical=False, ):
     '''Shift pixel rows and columns to simulate jittering in a STEM image.
@@ -316,8 +364,8 @@ class ImageModel:
         Angle of the fast-scan direction in degrees.
     drift_speed: float
         Automatically divided by image shape - should be 0-10.
-    drift_vector: length-2 vector
-        Direction of drift.
+    drift_angle: float
+        Drift angle in degrees.
     pixel_size: float
         Pixel dimensions in Å. Affects image resolution.
 
@@ -349,12 +397,13 @@ class ImageModel:
     def __init__(
         self, 
         atoms=None, positions=None, numbers=None,
-        scan_rotation = 0, drift_speed = 0, drift_vector=[1,0], 
+        scan_rotation = 0, drift_speed = 0, drift_angle=0, 
         pixel_size=0.1, jitter_strength=0,
         jitter_horizontal=True, jitter_vertical=False,
         sigma=0.4, power=1.8, 
         centre_drift=True, square = False, vacuum=5.0, fast=False,
-        random_offset=False, periodic_boundary=True):
+        random_offset=False,
+        drift_by_transform=True, kwargs_affine={}, periodic_boundary=True):
 
         if atoms:
             xlow, ylow = atoms.positions[:,:2].min(0) - vacuum
@@ -362,7 +411,7 @@ class ImageModel:
             mx = atoms.positions[:,:2].max(0)
             self.limits = (xlow, ylow, xhigh, yhigh)
             self.atoms = atoms
-            if periodic_boundary:
+            if periodic_boundary & (not drift_by_transform):
                 atoms = make_supercell(atoms, np.diag([3,3,1]))
                 atoms.positions[:,:2] -= mx
                 self.atoms2 = atoms
@@ -394,8 +443,13 @@ class ImageModel:
         self.jitter_vertical = jitter_vertical
 
         self.drift_speed = drift_speed
-        self.drift_vector = drift_vector
+        self.drift_angle = drift_angle
+        self.drift_vector = drift_speed * cp.array([cp.cos(cp.deg2rad(drift_angle)),
+                                                    cp.sin(cp.deg2rad(drift_angle))])
         self.centre_drift = centre_drift
+        self.drift_by_transform = drift_by_transform
+        self.kwargs_affine = kwargs_affine
+        
         self.scan_rotation = scan_rotation
         self.square = square
         self.margin = vacuum
@@ -454,15 +508,18 @@ class ImageModel:
             ).reshape((2, *XYshape[1:]))
 
         if self.drift_speed:
-            #speed = self.drift_speed / np.prod(XYshape[1:])
-            drift = add_drift(XYshape[1:], self.drift_vector, self.drift_speed)
-            self.probe_positions += drift
-            
-            if self.centre_drift:
-                driftx, drifty = drift
-                offsetx = driftx.max() if driftx.max() > -driftx.min() else driftx.min()
-                offsety = drifty.max() if drifty.max() > -drifty.min() else drifty.min()
-                self.probe_positions -= cp.array([offsetx, offsety])[:, None, None] / 2
+            if self.drift_by_transform:
+                self.probe_positions = add_drift_by_transform(self.probe_positions,
+                    self.scan_rotation, self.drift_speed, self.drift_angle,
+                    kwargs_affine=self.kwargs_affine)
+            else:
+                drift = add_drift_by_px(XYshape[1:], self.drift_vector, self.drift_speed)
+                self.probe_positions += drift*self.pixel_size
+                if self.centre_drift:
+                    driftx, drifty = drift
+                    offsetx = driftx.max() if driftx.max() > -driftx.min() else driftx.min()
+                    offsety = drifty.max() if drifty.max() > -drifty.min() else drifty.min()
+                    self.probe_positions -= cp.array([offsetx, offsety])[:, None, None] / 2
 
     def create_parameters(self):
         'Create the parameters that will describe the 2D-Gaussian distribution asigned to atoms.'
