@@ -138,43 +138,7 @@ def plot(points, ax, lim=((),())):
         ax.set_ylim(ymax, ymin)
     else:
         ax.set_xlim(lim[0])
-        ax.set_ylim(lim[1])  
-        
-def extend_3D_ones(arr_of_2d):
-    '''Turn a 2D points array (N, 2) into (N, 3) by padding with ones.
-    Used to calculate transform matrix between two sets of points.
-    '''
-    return np.hstack([arr_of_2d, np.ones((len(arr_of_2d),1))])
-    
-def calculate_transform_matrix(points, prime):
-    '''Calculate the affine transform matrix needed to turn one set of points into another.
-
-    Parameters
-    ----------
-    points: array of shape (N, 2)
-    prime: array of shape (N, 2)
-
-    Returns
-    -------
-    transform matrix: array of shape (3,3)
-    '''
-    points = extend_3D_ones(points)
-    prime = extend_3D_ones(prime)
-    T, *_ = np.linalg.lstsq(points, prime, rcond=None)
-    return T.T
-
-def transform_points(points: "(2, N)", transform: "(3,3)"):
-    '''Transform a 2D points array (2, N) by a 3x3 transform
-
-    Turns the list of points into a (N, 3)  array, transforms
-    and then removes the third coordinate again.
-    Supports cp as well!
-    '''
-    shape = points.shape
-    points = points.reshape((2, -1))
-    points = extend_3D_ones(points.T).T
-    prime = transform @ points
-    return prime[:2].reshape(shape)
+        ax.set_ylim(lim[1])
 
 def get_and_plot_peaks(data, average_distance_between_peaks=80, threshold = 1):
     import scipy.ndimage as ndimage

@@ -2,9 +2,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.transforms import Affine2D
 from .utils import (
-    cp, asnumpy, affine_transform, make_zero_zero, swap_transform_standard, tukey_window,
+    cp, asnumpy, affine_transform, make_zero_zero, swap_transform_standard, tukey_window, get_tukey_window,
     normalize_one, normalize_many, estimate_center, Gaussian2DFunc)
-from .Model import transform_points
+from .transform import (transform_points, transform_drift_scan,
+                        warp_image, warp_images, translate,
+                        add_shifts_and_rotation_to_transform)
 from tqdm.auto import tqdm
 from time import time
 from scipy.interpolate import NearestNDInterpolator, LinearNDInterpolator, CloughTocher2DInterpolator
@@ -258,9 +260,6 @@ def hybrid_correlation(
     center = cp.array(corr.shape) // 2
     return [x.item() for x in translation - center], corr.max()
 
-def get_tukey_window(shape, alpha=0.1):
-    return cp.asarray(tukey_window(shape, alpha=alpha))
-
 def prepare_correlate(images, window="tukey", window_strength=0.1):
     """Prepare images for hybrid correlation by windowing, normalizing, padding
      and taking the fft
@@ -334,105 +333,6 @@ def hybrid_correlation_prefft(
     translation = cp.array(cp.unravel_index(corr.argmax(), corr.shape))
     center = cp.array(corr.shape) // 2
     return [x.item() for x in translation - center], corr.max()
-
-def translate(img, shift, cval=0):
-    sx, sy = shift
-    if cval is True:
-        cval = np.nan
-    return affine_transform(
-        img,
-        cp.asarray(
-            np.linalg.inv(
-                swap_transform_standard(
-                    Affine2D().translate(sx, sy).get_matrix()))), 
-        order=1,
-        cval=cval)
-
-def transform_drift_scan(scan_angle=0, drift_angle=0, drift_speed=0, xlen=100):
-    '''Generates the transformation matrix, T, which includes the transformation from scan rotation, Tr, and drift, Tt.
-    
-    Parameters
-    ----------
-    scan_angles: float, int
-        Scan rotation angles for the stack of images in degrees.
-    drift_angle: float, int
-        Angle of drift in degrees.
-    drift_speed: float, int
-        
-    '''
-    arr = np.zeros(np.shape(drift_speed) + np.shape(drift_angle) + (3,3))
-    if np.shape(drift_speed):
-        drift_speed = drift_speed[:, None, None]
-    angle = np.deg2rad(drift_angle + scan_angle)
-    arr[...] = np.eye(3)
-    s_sin = drift_speed*(np.sin(angle)) 
-    s_cos = drift_speed*(np.cos(angle))
-    arr[..., 0,0] = 1 - s_cos
-    arr[..., 0,1] = -s_cos*xlen
-    arr[..., 0,2] = -s_cos
-    arr[..., 1,0] = -s_sin
-    arr[..., 1,1] = 1 - s_sin*xlen
-    arr[..., 1,2] = -s_sin
-    return arr.squeeze()
-
-def warp_images(images, scan_angles, drift_speed=0, drift_angle=0, nan=False):
-    warped_images = [warp_image(img, scan, drift_speed, drift_angle, nan=nan) for img, scan in zip(images, scan_angles)]
-    return cp.array(warped_images)
-
-def warp_and_shift_images(images, scan_angles, drift_speed=0, drift_angle=0, nan=False):
-    warped_images = warp_images(images, scan_angles, drift_speed, drift_angle, nan=False)
-    shifts, _ = hybrid_correlation_images(warped_images)
-    if nan:
-        warped_images = warp_images(images, scan_angles, drift_speed, drift_angle, nan=nan)
-
-    translated_images = cp.zeros(images.shape)
-    for i, (img, shift) in enumerate(zip(warped_images, shifts)):
-        translated_images[i] = translate(img, shift[::-1], cval=nan)
-    return translated_images, shifts
-
-def add_shifts_and_rotation_to_transform(transform, image_shape, scan_rotation_deg, post_shifts=[0,0]):
-    shift1, shift2 = (np.array(image_shape) - 1) / 2
-    post_shift1, post_shift2 = post_shifts[::-1]
-
-    T = (
-        Affine2D().translate(-shift1, -shift2)
-        + Affine2D(transform)
-        .rotate_deg(scan_rotation_deg)
-        .translate(shift1, shift2)
-        .translate(post_shift1, post_shift2)
-    )
-    return T
-
-
-def add_shifts_only_to_transform(transform, image_shape, scan_rotation_deg, ):#post_shifts=[0,0]):
-    shift1, shift2 = (np.array(image_shape) - 1) / 2
-    #post_shift1, post_shift2 = post_shifts[::-1]
-
-    T = (
-        Affine2D().translate(-shift1, -shift2)
-        + Affine2D(transform)
-        #.rotate_deg(scan_rotation_deg)
-        .translate(shift1, shift2)
-        #.translate(post_shift1, post_shift2)
-    )
-    return T
-
-def warp_image(img, scanrotation, drift_speed, drift_angle, nan=False, post_shifts=[0,0]):
-    drift_transform = transform_drift_scan(
-         -scanrotation,
-         drift_angle, 
-         drift_speed, 
-         img.shape[-2])
-    T = add_shifts_and_rotation_to_transform(drift_transform, img.shape, scanrotation, post_shifts)
-    cval = cp.nan if nan else 0 # value of pixels that were outside the image border
-    T2 = swap_transform_standard(T.get_matrix()).copy()
-    T3 = cp.array(T2)
-    T4 = cp.linalg.inv(T3)
-    return affine_transform(
-        img, 
-        T4,
-        order=1,
-        cval=cval)
 
 def warp_and_correlate(images, scan_angles, drift_angles, speeds, correlation_power=0.8):
     scores = cp.zeros((len(drift_angles), len(speeds)))
