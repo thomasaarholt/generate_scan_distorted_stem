@@ -488,6 +488,7 @@ class ImageModel:
                     offsety = drifty.max() if drifty.max() > -drifty.min() else drifty.min()
                     self.probe_positions -= cp.array([offsetx, offsety])[:, None, None] / 2
 
+
     def create_parameters(self):
         'Create the parameters that will describe the 2D-Gaussian distribution asigned to atoms.'
         xc, yc = self.atom_positions.T
