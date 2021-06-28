@@ -456,7 +456,7 @@ class ImageModel:
         if self.drift_speed:
             #speed = self.drift_speed / np.prod(XYshape[1:])
             drift = add_drift(XYshape[1:], self.drift_vector, self.drift_speed)
-            self.probe_positions += drift
+            self.probe_positions += drift*self.pixel_size
             
             if self.centre_drift:
                 driftx, drifty = drift
