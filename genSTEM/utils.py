@@ -46,6 +46,8 @@ def tukey_window(shape, alpha=0.1):
         filt2 = tukey(shape[1], alpha=alpha, sym=True)
     return filt1[:, None] * filt2
 
+def get_tukey_window(shape, alpha=0.1):
+    return cp.asarray(tukey_window(shape, alpha=alpha))
 
 def Gaussian2DFunc(YX, A=1, x0=0, y0=0, sigma=5, offset=0):
     y, x = YX
